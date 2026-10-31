@@ -1,0 +1,52 @@
+{
+  "name": "context-tracker",
+  "displayName": "Context Tracker",
+  "description": "Capture the prompt a project sends to a model and open each matching slice in the source file it came from.",
+  "version": "0.1.0",
+  "publisher": "context-tracker",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "capabilities": {
+    "virtualWorkspaces": false,
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Context Tracker reads a project folder and can update its .env so prompt capture can see model requests."
+    }
+  },
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onView:contextTracker.main"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "context-tracker",
+          "title": "Context Tracker",
+          "icon": "$(layers)"
+        }
+      ]
+    },
+    "views": {
+      "context-tracker": [
+        {
+          "type": "webview",
+          "id": "contextTracker.main",
+          "name": "Context Tracker"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -w -p .",
+    "test": "npm run compile && node --test test/*.cjs"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.6",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.6.3"
+  }
+}
