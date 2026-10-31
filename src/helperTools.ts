@@ -1,7 +1,9 @@
 import fs from "fs";
+import net from "net";
+import os from "os";
 import path from "path";
 import type { HelperTool } from "./harness";
-import { isInside, resolveAddressFile, toRelative } from "./paths";
+import { isHomeConfigPath, isInside, resolveAddressFile, toRelative } from "./paths";
 import { isSecretFile, redactText } from "./redact";
 import type { AddressOffer } from "./types";
 
@@ -11,15 +13,40 @@ const MAX_MATCHES = 30;
 const MAX_LIST = 200;
 
 export const ADDRESS_SYSTEM = [
-  "You find the HTTP address a project uses to call a model.",
-  "Use list_files, search_text, and read_file. You can open any file in the project except private key files.",
-  "You can also read_file an absolute path under the user home directory when the project code loads its saved config from there.",
-  "When you know the file and the exact URL written there, call propose_address.",
-  "Do not invent a URL. Do not propose port 47321.",
-  "Prefer the address the app reads at startup. A default written in source is not that address when the app loads a saved config file. Follow that saved file and propose the URL stored there.",
-].join(" ");
+  "You are Context Tracker's autonomous AI connection agent powered by Meta AI models (Muse Spark and Muse Wonder).",
+  "Your mission is to find the exact HTTP or HTTPS base address this project uses to communicate with an AI model provider (such as Ollama on localhost:11434, OpenAI, Anthropic, Chutes, vLLM, OpenRouter, LangChain, LlamaIndex, or custom HTTP clients) so Context Tracker can capture prompt traffic.",
+  "",
+  "### ARCHITECTURE & CLIENT CLASSIFICATION",
+  "Analyze the project's codebase to classify the LLM client architecture:",
+  "1. LLM Client / SDK: OpenAI SDK, Anthropic SDK, Ollama REST API, Chutes, vLLM, OpenRouter, LangChain, LlamaIndex, or raw HTTP client (fetch, requests, axios, httpx, aiohttp, urllib, etc.).",
+  "2. Configuration Sourcing Hierarchy:",
+  "   - Type A (Environment Variables): .env, process.env, os.environ (e.g. OPENAI_BASE_URL, ANTHROPIC_BASE_URL, OLLAMA_HOST).",
+  "   - Type B (In-Tree Config Files): config.yaml, config.json, settings.json, appsettings.json in the repository.",
+  "   - Type C (External User/System Configs): files loaded from ~/.config/<app>/..., ~/.<app>/..., or %APPDATA%/<app>/...",
+  "   - Type D (In-Code Default Fallbacks): hardcoded fallback literals in source code (e.g. const fallback = 'http://127.0.0.1:11434').",
+  "",
+  "### RUNTIME DECISION RULE & PRECEDENCE",
+  "- CRITICAL: If an application defines a fallback in source code (Type D) but reads an active configuration from disk (Type A, B, or C), Type D is inert at runtime. You MUST propose the active configuration file (Type A, B, or C) that the application reads at runtime.",
+  "- If source code loads an external user configuration (e.g. in ~/.config/<app>/ or ~/.<app>/), call find_user_config_dirs to discover the active config files on disk, inspect them with read_file, and propose the address configured inside that user config file.",
+  "",
+  "### SENSORY GROUNDING & LOCAL SERVICES",
+  "- Call detect_local_services when checking local model endpoints (Ollama on 11434, LM Studio on 1234, vLLM/LocalAI on 8000, Text Generation WebUI on 5000) to ground whether a service is actively listening on this machine.",
+  "- Call find_user_config_dirs with app hints when the app refers to user configuration directories or when checking for external runtime configurations.",
+  "",
+  "### PARALLEL TOOL CALLING EFFICIENCY",
+  "- Muse Spark 1.3 and Muse Wonder support parallel tool calling. In your initial turn, batch your reconnaissance into parallel tool calls! For example, simultaneously query detect_local_services, find_user_config_dirs, and search_text or read_file in a single turn.",
+  "- This enables single-turn or 2-turn resolution without unnecessary roundtrips.",
+  "",
+  "### RULES & CONSTRAINTS",
+  "- Do not invent a URL. The proposed URL must exist verbatim in the file you propose.",
+  "- Port 47321 is Context Tracker's own recording proxy; never propose port 47321.",
+  "- When you identify the active file and the exact URL configured there, call propose_address to finish.",
+].join("\n");
 
-export function addressTools(root: string): Array<HelperTool<AddressOffer>> {
+export function addressTools(
+  root: string,
+  options?: { failedFile?: string; failedUrl?: string },
+): Array<HelperTool<AddressOffer>> {
   return [
     {
       name: "list_files",
@@ -33,13 +60,19 @@ export function addressTools(root: string): Array<HelperTool<AddressOffer>> {
     },
     {
       name: "search_text",
-      description: "Search project text for a short literal. Returns redacted matching lines.",
+      description: "Search project text for a literal query, regex pattern, or multiple queries. Returns redacted matching lines.",
       parameters: {
         type: "object",
-        properties: { query: { type: "string" } },
-        required: ["query"],
+        properties: {
+          query: { type: "string", description: "Search query or regex pattern (e.g. '11434|ollama|base_url')." },
+          queries: {
+            type: "array",
+            items: { type: "string" },
+            description: "Optional array of multiple search terms to match in one pass.",
+          },
+        },
       },
-      run: (args) => ({ content: searchText(root, stringField(args, "query")) }),
+      run: (args) => ({ content: searchText(root, args) }),
     },
     {
       name: "read_file",
@@ -50,6 +83,30 @@ export function addressTools(root: string): Array<HelperTool<AddressOffer>> {
         required: ["path"],
       },
       run: (args) => ({ content: readFile(root, stringField(args, "path")) }),
+    },
+    {
+      name: "find_user_config_dirs",
+      description: "Check user configuration locations (~/.config, ~/.<name>, and %APPDATA%) for directories and configuration files matching the application's name or hints. Returns existing directories and configuration files found on disk.",
+      parameters: {
+        type: "object",
+        properties: {
+          app_hints: {
+            type: "array",
+            items: { type: "string" },
+            description: "Optional list of application name hints or identifiers to search for (e.g. ['optimalx', 'eidosbot']). Inferred from project name and package.json if omitted.",
+          },
+        },
+      },
+      run: (args) => ({ content: findUserConfigDirs(root, args) }),
+    },
+    {
+      name: "detect_local_services",
+      description: "Detect which common local AI model servers (Ollama on 11434, LM Studio on 1234, vLLM/LocalAI on 8000, Text Generation WebUI on 5000) are actively listening on localhost.",
+      parameters: {
+        type: "object",
+        properties: {},
+      },
+      run: async () => ({ content: await detectLocalServices() }),
     },
     {
       name: "propose_address",
@@ -63,12 +120,16 @@ export function addressTools(root: string): Array<HelperTool<AddressOffer>> {
         },
         required: ["file", "url", "reason"],
       },
-      run: (args) => proposeAddress(root, args),
+      run: (args) => proposeAddress(root, args, options),
     },
   ];
 }
 
-export function proposeAddress(root: string, args: unknown): { content: string; finish?: AddressOffer } {
+export function proposeAddress(
+  root: string,
+  args: unknown,
+  options?: { failedFile?: string; failedUrl?: string },
+): { content: string; finish?: AddressOffer } {
   const file = stringField(args, "file");
   const url = stringField(args, "url");
   const reason = stringField(args, "reason").slice(0, 200);
@@ -88,6 +149,14 @@ export function proposeAddress(root: string, args: unknown): { content: string; 
   if (isSecretFile(absolute)) {
     return { content: "That file is private. Find the address in another file." };
   }
+  if (options?.failedFile) {
+    const failedAbs = resolveAddressFile(root, options.failedFile);
+    if (failedAbs && absolute === failedAbs) {
+      return {
+        content: `This file (${toRelative(root, absolute)}) was already armed and bypassed. Diagnose why it was bypassed, investigate other configuration files (such as user config directories), and propose the active address configured in that other file.`,
+      };
+    }
+  }
   let text: string;
   try {
     text = fs.readFileSync(absolute, "utf8");
@@ -99,6 +168,12 @@ export function proposeAddress(root: string, args: unknown): { content: string; 
   if (lineIndex < 0) {
     return { content: "That URL is not in the file." };
   }
+  const detectedConfig = detectSourceConfigFile(absolute, text);
+  if (detectedConfig) {
+    return {
+      content: `This file (${toRelative(root, absolute)}) is source code defining fallback defaults, but it references an active user configuration file at ${detectedConfig}. Please read ${detectedConfig} and call propose_address with that configuration file and the URL configured inside it so the running application connects to capture.`,
+    };
+  }
   return {
     content: "Address accepted.",
     finish: {
@@ -108,6 +183,44 @@ export function proposeAddress(root: string, args: unknown): { content: string; 
       reason,
     },
   };
+}
+
+export function detectSourceConfigFile(filePath: string, text: string): string | null {
+  const ext = path.extname(filePath).toLowerCase();
+  if (![".js", ".ts", ".mjs", ".cjs", ".py"].includes(ext)) {
+    return null;
+  }
+  const home = os.homedir();
+
+  const match1 = text.match(/['"]\.config['"]\s*,\s*['"]([a-zA-Z0-9_-]+)['"]/i) ||
+                 text.match(/\.config[/\\]([a-zA-Z0-9_-]+)/i);
+  if (match1) {
+    const appFolder = match1[1];
+    for (const name of ["config.json", "config.yaml", "config.yml", ".env", "settings.json"]) {
+      const candidate = path.join(home, ".config", appFolder, name);
+      try {
+        if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+          return candidate;
+        }
+      } catch {
+        continue;
+      }
+    }
+  }
+
+  const match2 = text.match(/~[/\\]\.([a-zA-Z0-9_-]+)[/\\]([a-zA-Z0-9_.-]+)/);
+  if (match2) {
+    const candidate = path.join(home, "." + match2[1], match2[2]);
+    try {
+      if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+        return candidate;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return null;
 }
 
 function listFiles(root: string, relativeDir: string): string {
@@ -137,9 +250,50 @@ function listFiles(root: string, relativeDir: string): string {
   return names.join("\n") || "(empty)";
 }
 
-function searchText(root: string, query: string): string {
-  const needle = query.trim();
-  if (needle.length < 2) {
+function compileSearchPattern(query?: string, queries?: string[]): RegExp | null {
+  const parts: string[] = [];
+  if (Array.isArray(queries)) {
+    for (const q of queries) {
+      if (typeof q === "string" && q.trim().length >= 2) {
+        parts.push(escapeRegex(q.trim()));
+      }
+    }
+  }
+  if (typeof query === "string" && query.trim().length >= 2) {
+    const trimmed = query.trim();
+    try {
+      new RegExp(trimmed);
+      parts.push(`(?:${trimmed})`);
+    } catch {
+      parts.push(escapeRegex(trimmed));
+    }
+  }
+  if (parts.length === 0) {
+    return null;
+  }
+  return new RegExp(parts.join("|"), "i");
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export function searchText(root: string, args: unknown): string {
+  let query: string | undefined;
+  let queries: string[] | undefined;
+  if (typeof args === "string") {
+    query = args;
+  } else if (args && typeof args === "object") {
+    const record = args as Record<string, unknown>;
+    if (typeof record.query === "string") {
+      query = record.query;
+    }
+    if (Array.isArray(record.queries)) {
+      queries = record.queries.filter((item): item is string => typeof item === "string");
+    }
+  }
+  const regex = compileSearchPattern(query, queries);
+  if (!regex) {
     return "The query must be at least 2 characters.";
   }
   const matches: string[] = [];
@@ -157,12 +311,12 @@ function searchText(root: string, query: string): string {
     } catch {
       return;
     }
-    if (text.includes("\u0000") || !text.includes(needle)) {
+    if (text.includes("\u0000") || !regex.test(text)) {
       return;
     }
     const relative = toRelative(root, file);
     text.split(/\r?\n/).forEach((line, index) => {
-      if (matches.length >= MAX_MATCHES || !line.includes(needle)) {
+      if (matches.length >= MAX_MATCHES || !regex.test(line)) {
         return;
       }
       matches.push(`${relative}:${index + 1}: ${redactText(line)}`);
@@ -253,4 +407,327 @@ function isCaptureUrl(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+export function buildHelperUserPrompt(
+  clues: { file: string; line: number; text: string }[],
+  projectInfo?: { name?: string; path?: string },
+): string {
+  const base = "Find the HTTP address this project uses to call a model.";
+  const parts: string[] = [base];
+  if (projectInfo?.name) {
+    parts.push(`Project name: ${projectInfo.name}`);
+  }
+  if (clues && clues.length > 0) {
+    const sample = clues.slice(0, 8);
+    const lines = sample.map((c) => `- ${c.file}:${c.line}: ${c.text}`);
+    parts.push(`Preliminary scan detected these potential references in the project. Check these first:\n${lines.join("\n")}`);
+  }
+  return parts.join("\n\n");
+}
+
+export function buildDiagnosticUserPrompt(options: {
+  failedFile: string;
+  failedUrl: string;
+  reason?: string;
+  projectName?: string;
+  clues?: { file: string; line: number; text: string }[];
+}): string {
+  const parts: string[] = [];
+  const diagnosticHeader = [
+    `Capture was armed pointing to ${options.failedFile} (${options.failedUrl}), but an application message was sent and bypassed the recorder.`,
+    options.reason ? `Symptom: ${options.reason}` : "",
+    `Diagnose why the application did not use ${options.failedFile}.`,
+    `Investigate alternative configuration paths, runtime overrides, or user config files (~/.config, ~/.<app>, %APPDATA%), and propose the true active connection address.`,
+  ].filter(Boolean).join("\n\n");
+
+  parts.push(diagnosticHeader);
+
+  if (options.projectName) {
+    parts.push(`Project name: ${options.projectName}`);
+  }
+
+  if (options.clues && options.clues.length > 0) {
+    const sample = options.clues.slice(0, 8);
+    const lines = sample.map((c) => `- ${c.file}:${c.line}: ${c.text}`);
+    parts.push(`Preliminary scan detected these potential references in the project. Check these first:\n${lines.join("\n")}`);
+  }
+
+  return parts.join("\n\n");
+}
+
+export interface LocalServiceInfo {
+  name: string;
+  port: number;
+  url: string;
+}
+
+export const KNOWN_LOCAL_SERVICES: LocalServiceInfo[] = [
+  { name: "Ollama", port: 11434, url: "http://127.0.0.1:11434" },
+  { name: "LM Studio", port: 1234, url: "http://127.0.0.1:1234" },
+  { name: "vLLM / LocalAI", port: 8000, url: "http://127.0.0.1:8000" },
+  { name: "Text Generation WebUI", port: 5000, url: "http://127.0.0.1:5000" },
+];
+
+export type PortProbeFn = (host: string, port: number, timeoutMs?: number) => Promise<boolean>;
+
+export function probePort(host: string, port: number, timeoutMs = 300): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const socket = new net.Socket();
+    let settled = false;
+
+    const cleanup = () => {
+      if (!settled) {
+        settled = true;
+        socket.removeAllListeners();
+        socket.destroy();
+      }
+    };
+
+    socket.setTimeout(timeoutMs);
+    socket.once("connect", () => {
+      cleanup();
+      resolve(true);
+    });
+    socket.once("timeout", () => {
+      cleanup();
+      resolve(false);
+    });
+    socket.once("error", () => {
+      cleanup();
+      resolve(false);
+    });
+
+    try {
+      socket.connect(port, host);
+    } catch {
+      cleanup();
+      resolve(false);
+    }
+  });
+}
+
+export async function detectLocalServices(
+  services: LocalServiceInfo[] = KNOWN_LOCAL_SERVICES,
+  probe: PortProbeFn = probePort,
+): Promise<string> {
+  const results = await Promise.all(
+    services.map(async (service) => {
+      const active = await probe("127.0.0.1", service.port, 300);
+      return { ...service, active };
+    }),
+  );
+
+  const activeServices = results.filter((r) => r.active);
+  const inactiveServices = results.filter((r) => !r.active);
+
+  const lines: string[] = [];
+  if (activeServices.length > 0) {
+    lines.push(`Active local AI services detected (${activeServices.length}):`);
+    for (const s of activeServices) {
+      lines.push(`- ${s.name}: ${s.url} (listening on port ${s.port})`);
+    }
+  } else {
+    lines.push("No active local AI services detected on standard ports.");
+  }
+
+  if (inactiveServices.length > 0) {
+    lines.push("\nProbed inactive services (not listening):");
+    for (const s of inactiveServices) {
+      lines.push(`- ${s.name}: ${s.url} (port ${s.port} closed)`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+const COMMON_CONFIG_EXTS = new Set([
+  ".json",
+  ".yaml",
+  ".yml",
+  ".toml",
+  ".ini",
+  ".conf",
+  ".cfg",
+]);
+
+export function inferAppHints(root: string): string[] {
+  const hints = new Set<string>();
+
+  const base = path.basename(root).trim();
+  if (base && !/^(src|app|workspace|project|code|repo|test)$/i.test(base)) {
+    hints.add(base);
+  }
+
+  try {
+    const pkgPath = path.join(root, "package.json");
+    if (fs.existsSync(pkgPath)) {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+      if (typeof pkg.name === "string" && pkg.name.trim()) {
+        const rawName = pkg.name.trim();
+        const unscoped = rawName.includes("/") ? rawName.split("/").pop()! : rawName;
+        hints.add(unscoped);
+        hints.add(rawName);
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  const expanded = new Set<string>();
+  for (const h of hints) {
+    const lower = h.toLowerCase();
+    expanded.add(lower);
+    if (lower.includes("-")) {
+      expanded.add(lower.replace(/-/g, ""));
+      expanded.add(lower.replace(/-/g, "_"));
+    }
+    if (lower.includes("_")) {
+      expanded.add(lower.replace(/_/g, ""));
+      expanded.add(lower.replace(/_/g, "-"));
+    }
+  }
+
+  return [...expanded].filter((h) => h.length >= 2);
+}
+
+export function findUserConfigDirs(
+  root: string,
+  args?: unknown,
+  customHome?: string,
+  customAppData?: string,
+): string {
+  const userHints: string[] = [];
+  if (args && typeof args === "object") {
+    const rec = args as Record<string, unknown>;
+    if (Array.isArray(rec.app_hints)) {
+      for (const item of rec.app_hints) {
+        if (typeof item === "string" && item.trim()) {
+          userHints.push(item.trim());
+        }
+      }
+    } else if (typeof rec.hint === "string" && rec.hint.trim()) {
+      userHints.push(rec.hint.trim());
+    }
+  }
+
+  const inferred = inferAppHints(root);
+  const allHintsSet = new Set<string>();
+
+  for (const h of [...userHints, ...inferred]) {
+    const lower = h.toLowerCase();
+    allHintsSet.add(lower);
+    if (lower.includes("-")) {
+      allHintsSet.add(lower.replace(/-/g, ""));
+      allHintsSet.add(lower.replace(/-/g, "_"));
+    }
+    if (lower.includes("_")) {
+      allHintsSet.add(lower.replace(/_/g, ""));
+      allHintsSet.add(lower.replace(/_/g, "-"));
+    }
+  }
+
+  const hints = [...allHintsSet].filter((h) => h.length >= 2);
+  const home = customHome || os.homedir();
+  const appData = customAppData || process.env.APPDATA || (process.platform === "win32" ? path.join(home, "AppData", "Roaming") : undefined);
+  const localAppData = process.env.LOCALAPPDATA || (process.platform === "win32" ? path.join(home, "AppData", "Local") : undefined);
+
+  type FoundDir = {
+    dir: string;
+    files: string[];
+  };
+
+  const foundDirs: FoundDir[] = [];
+  const checkedCandidateDirs = new Set<string>();
+
+  for (const hint of hints) {
+    const candidates: string[] = [
+      path.join(home, ".config", hint),
+      path.join(home, "." + hint),
+    ];
+    if (appData) {
+      candidates.push(path.join(appData, hint));
+    }
+    if (localAppData && localAppData !== appData) {
+      candidates.push(path.join(localAppData, hint));
+    }
+
+    for (const dir of candidates) {
+      if (checkedCandidateDirs.has(dir)) {
+        continue;
+      }
+      checkedCandidateDirs.add(dir);
+
+      try {
+        if (!fs.existsSync(dir)) {
+          continue;
+        }
+        const stat = fs.statSync(dir);
+        if (!stat.isDirectory()) {
+          if (stat.isFile() && !isSecretFile(dir)) {
+            foundDirs.push({ dir: path.dirname(dir), files: [dir] });
+          }
+          continue;
+        }
+
+        const entries = fs.readdirSync(dir, { withFileTypes: true });
+        const configFiles: string[] = [];
+        for (const entry of entries) {
+          if (entry.isFile()) {
+            const filePath = path.join(dir, entry.name);
+            if (isSecretFile(filePath)) {
+              continue;
+            }
+            const ext = path.extname(entry.name).toLowerCase();
+            if (
+              COMMON_CONFIG_EXTS.has(ext) ||
+              /^(config|settings|preferences)/i.test(entry.name)
+            ) {
+              configFiles.push(filePath);
+            }
+          }
+        }
+        if (configFiles.length > 0 || entries.length === 0) {
+          foundDirs.push({ dir, files: configFiles });
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    for (const singleExt of [".json", ".yaml", ".yml", ".toml", "rc"]) {
+      const singleFile = path.join(home, "." + hint + singleExt);
+      if (checkedCandidateDirs.has(singleFile)) {
+        continue;
+      }
+      checkedCandidateDirs.add(singleFile);
+      try {
+        if (fs.existsSync(singleFile) && fs.statSync(singleFile).isFile() && !isSecretFile(singleFile)) {
+          foundDirs.push({ dir: home, files: [singleFile] });
+        }
+      } catch {
+        continue;
+      }
+    }
+  }
+
+  if (foundDirs.length === 0) {
+    return `No user configuration directories found matching hints: ${hints.join(", ") || "(none)"}.\nChecked standard locations under ~/.config, ~/.<name>, and %APPDATA%.`;
+  }
+
+  const lines: string[] = [];
+  lines.push(`Found ${foundDirs.length} user configuration location(s):`);
+  for (const item of foundDirs) {
+    lines.push(`\nDirectory: ${item.dir}`);
+    if (item.files.length > 0) {
+      lines.push("Configuration files:");
+      for (const file of item.files) {
+        lines.push(`- ${file}`);
+      }
+    } else {
+      lines.push("(Directory exists but contains no configuration files)");
+    }
+  }
+  lines.push(`\nUse read_file with any of the above file paths to inspect active configuration.`);
+  return lines.join("\n");
 }

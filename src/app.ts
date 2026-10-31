@@ -5,7 +5,7 @@ import * as vscode from "vscode";
 import { deriveCapture, presentCapture } from "./derive";
 import { ANTHROPIC_ENV, applyEnv, OPENAI_ENV, proposedBases, readEnvStatus, restoreEnv } from "./env";
 import { completeChat, listHelperModels, META_HELPER_BASE, META_MODELS } from "./helperClient";
-import { ADDRESS_SYSTEM, addressTools } from "./helperTools";
+import { ADDRESS_SYSTEM, addressTools, buildDiagnosticUserPrompt, buildHelperUserPrompt } from "./helperTools";
 import { runHarness } from "./harness";
 import { panelHtml } from "./html";
 import { indexProject } from "./indexer";
@@ -14,6 +14,7 @@ import { CAPTURE_PORT, chooseUpstream, startRecorder, type RecorderCapture, type
 import { armRedirect, chooseEndpoint, endpointLabel, findEndpoints, planRewrite, restoreAllRedirects, type FoundEndpoint } from "./redirect";
 import { CaptureStore } from "./store";
 import type { AddressOffer, ProjectIndex, ProjectView, ReportedSpan, RouteSettings, StoredCapture, ViewState } from "./types";
+import { TrafficWatchdog } from "./watchdog";
 
 const PROJECT_KEY = "contextTracker.projectPath";
 const ROUTE_KEY = "contextTracker.route";
@@ -43,6 +44,11 @@ export class TrackerApp {
   private server: RecorderServer | null = null;
   private route: RouteSettings = { mode: "auto", customUpstream: "" };
   private readonly redirectDir: string;
+  private readonly ignoredEndpoints = new Set<string>();
+  private readonly watchdog = new TrafficWatchdog({
+    onStateChange: () => this.push(),
+  });
+  private currentEndpoint: FoundEndpoint | null = null;
   private foundLabel: string | null = null;
   private recorderError: string | null = null;
   private lastEvent: string | null = null;
@@ -92,6 +98,7 @@ export class TrackerApp {
   dispose(): void {
     this.indexGeneration += 1;
     clearTimeout(this.statusTimer);
+    this.watchdog.stop();
     restoreAllRedirects(this.redirectDir);
     void this.server?.close().catch(() => undefined);
     this.server = null;
@@ -140,6 +147,7 @@ export class TrackerApp {
     if (!message || typeof message !== "object" || !("type" in message)) {
       return;
     }
+    this.watchdog.recordUserActivity();
     const body = message as { type?: string; [key: string]: unknown };
     switch (body.type) {
       case "ready":
@@ -154,6 +162,9 @@ export class TrackerApp {
       case "stopCapture":
         await this.stopCapture();
         return;
+      case "troubleshootConnection":
+        await this.troubleshootConnection();
+        return;
       case "openHelper":
         this.helperConnectOpen = !this.helperConnectOpen;
         this.push();
@@ -166,6 +177,9 @@ export class TrackerApp {
         return;
       case "findAddress":
         await this.findAddress();
+        return;
+      case "forgetAddress":
+        await this.forgetAddress();
         return;
       case "confirmAddress":
         await this.confirmAddress();
@@ -265,6 +279,7 @@ export class TrackerApp {
     this.addressOffer = null;
     this.helperRun += 1;
     this.helperBusy = false;
+    this.ignoredEndpoints.delete(resolved);
     this.summaries = await this.store.list(resolved);
     await this.context.globalState.update(PROJECT_KEY, resolved);
     this.refreshStatus();
@@ -296,9 +311,12 @@ export class TrackerApp {
       return;
     }
     restoreAllRedirects(this.redirectDir);
-    let chosen = chooseEndpoint(findEndpoints(this.project.path));
-    if (!chosen) {
-      chosen = this.getSavedEndpoint(this.project.path);
+    let chosen: FoundEndpoint | null = null;
+    if (!this.ignoredEndpoints.has(this.project.path)) {
+      chosen = chooseEndpoint(findEndpoints(this.project.path));
+      if (!chosen) {
+        chosen = this.getSavedEndpoint(this.project.path);
+      }
     }
     if (!chosen) {
       this.foundLabel = null;
@@ -370,6 +388,9 @@ export class TrackerApp {
     this.helperNeeded = false;
     this.addressOffer = null;
     this.foundLabel = endpointLabel(chosen);
+    this.currentEndpoint = chosen;
+    this.watchdog.setUpstream(plan.upstream);
+    this.watchdog.start();
     this.lastEvent = `Capture is on. ${chosen.relativeFile} now points at capture. Close the app and start it again, then send a message. A message from an app that is already open is not recorded.`;
     this.output.appendLine(`Routing ${chosen.relativeFile} ${chosen.keyPath} through capture to ${plan.upstream}`);
     await this.saveConfirmedEndpoint(chosen);
@@ -443,9 +464,13 @@ export class TrackerApp {
     this.status.show();
     this.push();
     try {
+      const userPrompt = buildHelperUserPrompt(this.project.clues || [], {
+        name: this.project.name,
+        path: this.project.path,
+      });
       const result = await runHarness({
         system: ADDRESS_SYSTEM,
-        user: "Find the HTTP address this project uses to call a model.",
+        user: userPrompt,
         tools: addressTools(projectPath),
         stepCap: 16,
         complete: (messages, tools) => completeChat({
@@ -492,9 +517,13 @@ export class TrackerApp {
   }
 
   private async confirmAddress(): Promise<void> {
-    if (!this.project || !this.addressOffer || this.server) {
+    if (!this.project || !this.addressOffer) {
       return;
     }
+    if (this.server) {
+      await this.stopCapture();
+    }
+    this.ignoredEndpoints.delete(this.project.path);
     const offer = this.addressOffer;
     const filePath = resolveAddressFile(this.project.path, offer.relativeFile);
     if (!filePath) {
@@ -513,6 +542,8 @@ export class TrackerApp {
   }
 
   private async stopCapture(): Promise<void> {
+    this.watchdog.stop();
+    this.currentEndpoint = null;
     const server = this.server;
     this.server = null;
     if (server) {
@@ -525,12 +556,167 @@ export class TrackerApp {
     this.push();
   }
 
+  public async diagnoseConnection(
+    project: ProjectView,
+    failedEndpoint: { relativeFile: string; url: string; reason?: string },
+  ): Promise<AddressOffer | null> {
+    if (!this.helperKeySaved || !this.helperModel.trim()) {
+      this.helperConnectOpen = true;
+      this.helperStatus = "Connect an AI helper to run connection diagnostics.";
+      this.push();
+      return null;
+    }
+    const apiKey = await this.context.secrets.get(HELPER_SECRET);
+    if (!apiKey) {
+      this.helperKeySaved = false;
+      this.helperConnectOpen = true;
+      this.helperStatus = "API key was not found. Connect the AI helper again.";
+      this.push();
+      return null;
+    }
+    const run = ++this.helperRun;
+    const diagnosing = `The AI helper is diagnosing why traffic bypassed ${failedEndpoint.relativeFile}...`;
+    this.helperBusy = true;
+    this.addressOffer = null;
+    this.helperStatus = diagnosing;
+    this.lastEvent = diagnosing;
+    this.status.text = "$(loading~spin) AI helper diagnosing";
+    this.status.tooltip = diagnosing;
+    this.status.show();
+    this.push();
+
+    try {
+      const userPrompt = buildDiagnosticUserPrompt({
+        failedFile: failedEndpoint.relativeFile,
+        failedUrl: failedEndpoint.url,
+        reason: failedEndpoint.reason || "Outbound prompts bypassed recorder port 47321.",
+        projectName: project.name,
+        clues: project.clues,
+      });
+
+      const result = await runHarness({
+        system: ADDRESS_SYSTEM,
+        user: userPrompt,
+        tools: addressTools(project.path, {
+          failedFile: failedEndpoint.relativeFile,
+          failedUrl: failedEndpoint.url,
+        }),
+        stepCap: 16,
+        complete: (messages, tools) =>
+          completeChat({
+            baseUrl: META_HELPER_BASE,
+            apiKey,
+            model: this.helperModel,
+            messages,
+            tools,
+          }),
+        onTool: (name) => {
+          if (run !== this.helperRun) {
+            return;
+          }
+          const step = helperStepLabel(name);
+          this.helperStatus = step;
+          this.lastEvent = step;
+          this.push();
+        },
+      });
+
+      if (run !== this.helperRun) {
+        return null;
+      }
+
+      if (!result.finish) {
+        this.helperStatus = "Diagnostic search completed without finding an alternative address. Check your app's configuration files.";
+        this.lastEvent = this.helperStatus;
+        return null;
+      }
+
+      const offer: AddressOffer = {
+        ...result.finish,
+        previousFile: failedEndpoint.relativeFile,
+        explanation: `Helper found that the app loaded settings from ${result.finish.relativeFile} instead of ${failedEndpoint.relativeFile}. Click to switch connection.`,
+      };
+      this.addressOffer = offer;
+      this.helperStatus = offer.explanation ?? null;
+      this.lastEvent = offer.explanation ?? null;
+      return offer;
+    } catch (error) {
+      if (run !== this.helperRun) {
+        return null;
+      }
+      this.helperStatus = error instanceof Error ? error.message : "Connection diagnostics failed.";
+      this.lastEvent = this.helperStatus;
+      return null;
+    } finally {
+      if (run === this.helperRun) {
+        this.helperBusy = false;
+        this.refreshStatus();
+        this.push();
+      }
+    }
+  }
+
+  private async troubleshootConnection(): Promise<void> {
+    if (!this.server) {
+      this.lastEvent = "Capture is not running.";
+      this.push();
+      return;
+    }
+    this.watchdog.troubleshoot();
+    const upstream = this.route.customUpstream || "the model provider";
+    this.output.appendLine(`[Watchdog] Troubleshoot connection requested. Traffic state: ${this.watchdog.getState()}. Requests: ${this.watchdog.getRequestCount()}. Uptime: ${this.watchdog.getUptimeSeconds()}s.`);
+
+    if (this.currentEndpoint && this.project && this.helperKeySaved && this.helperModel.trim()) {
+      await this.diagnoseConnection(this.project, {
+        relativeFile: this.currentEndpoint.relativeFile,
+        url: this.currentEndpoint.value,
+        reason: `Capture was armed pointing to ${this.currentEndpoint.relativeFile}, but no messages arrived at port 47321 after ${this.watchdog.getUptimeSeconds()}s.`,
+      });
+      return;
+    }
+
+    if (!this.helperKeySaved || !this.helperModel.trim()) {
+      this.helperConnectOpen = true;
+      this.helperStatus = "Connect an AI helper to diagnose why the app is bypassing capture.";
+    }
+
+    this.lastEvent = `Troubleshoot connection: watching for missed traffic. App may still be pointing directly to ${upstream}. Close and re-launch your app, or check your configuration.`;
+    this.push();
+  }
+
   private refreshFoundLabel(): void {
     if (!this.project || this.server) {
       return;
     }
+    if (this.ignoredEndpoints.has(this.project.path)) {
+      this.foundLabel = null;
+      return;
+    }
     const chosen = chooseEndpoint(findEndpoints(this.project.path)) ?? this.getSavedEndpoint(this.project.path);
     this.foundLabel = chosen ? endpointLabel(chosen) : null;
+  }
+
+  private async forgetAddress(): Promise<void> {
+    if (!this.project) {
+      return;
+    }
+    this.watchdog.stop();
+    this.currentEndpoint = null;
+    if (this.server) {
+      const server = this.server;
+      this.server = null;
+      await server.close().catch(() => undefined);
+    }
+    restoreAllRedirects(this.redirectDir);
+    const key = SAVED_ENDPOINT_PREFIX + projectKey(this.project.path);
+    await this.context.globalState.update(key, undefined);
+    this.ignoredEndpoints.add(this.project.path);
+    this.foundLabel = null;
+    this.addressOffer = null;
+    this.helperNeeded = false;
+    this.lastEvent = "Address disconnected. You can now use Start capture or Find address with AI helper.";
+    this.refreshStatus();
+    this.push();
   }
 
   private getSavedEndpoint(projectPath: string): FoundEndpoint | null {
@@ -642,6 +828,7 @@ export class TrackerApp {
       reported: pending,
     };
     this.live.set(capture.id, capture);
+    this.watchdog.recordRequest();
     if (incoming.clientRequestId) {
       this.clientIds.set(incoming.clientRequestId, capture.id);
     }
@@ -866,6 +1053,10 @@ export class TrackerApp {
         error: this.recorderError,
         lastEvent: this.lastEvent,
         found: this.foundLabel,
+        trafficState: this.watchdog.getState(),
+        requestCount: this.watchdog.getRequestCount(),
+        uptimeSeconds: this.watchdog.getUptimeSeconds(),
+        missedHint: this.watchdog.getMissedHint(),
       },
       helper: {
         model: this.helperModel,
@@ -903,6 +1094,12 @@ function helperStepLabel(name: string): string {
   }
   if (name === "read_file") {
     return "The AI helper is reading a project file to find the model address.";
+  }
+  if (name === "find_user_config_dirs") {
+    return "The AI helper is searching user configuration directories for active settings.";
+  }
+  if (name === "detect_local_services") {
+    return "The AI helper is detecting active local AI services.";
   }
   if (name === "propose_address") {
     return "The AI helper is checking a model address it found.";

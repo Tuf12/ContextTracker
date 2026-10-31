@@ -35,12 +35,24 @@ export function isRewritablePath(projectPath: string, filePath: string): boolean
   return isHomeConfigPath(absolute);
 }
 
+export function expandHomeDir(filepath: string): string {
+  const home = os.homedir();
+  if (filepath.startsWith(`~${path.sep}`) || filepath === "~") {
+    return path.join(home, filepath.slice(1));
+  }
+  if (filepath.startsWith("~/")) {
+    return path.join(home, filepath.slice(2));
+  }
+  return filepath;
+}
+
 export function resolveAddressFile(root: string, file: string): string | null {
-  const absolute = path.isAbsolute(file) ? path.resolve(file) : path.resolve(root, file);
+  const expanded = expandHomeDir(file.trim());
+  const absolute = path.isAbsolute(expanded) ? path.resolve(expanded) : path.resolve(root, expanded);
   if (isInside(root, absolute)) {
     return existingFile(absolute);
   }
-  if (!path.isAbsolute(file) || !isHomeConfigPath(absolute)) {
+  if (!isHomeConfigPath(absolute)) {
     return null;
   }
   return existingFile(absolute);
@@ -57,7 +69,11 @@ function existingFile(absolute: string): string | null {
   return absolute;
 }
 
-function isHomeConfigPath(absolute: string): boolean {
+export function isHomeConfigPath(absolute: string): boolean {
+  const appData = process.env.APPDATA ? path.resolve(process.env.APPDATA) : null;
+  if (appData && isInside(appData, absolute) && !isSecretFile(absolute)) {
+    return true;
+  }
   const home = path.resolve(os.homedir());
   if (!isInside(home, absolute) || isSecretFile(absolute)) {
     return false;

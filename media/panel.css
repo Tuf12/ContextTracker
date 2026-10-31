@@ -158,6 +158,12 @@ p {
   border: 1px solid var(--vscode-inputValidation-errorBorder, var(--vscode-widget-border));
 }
 
+.banner.warning {
+  background: var(--vscode-inputValidation-warningBackground, #382c16);
+  border: 1px solid var(--vscode-inputValidation-warningBorder, #b89500);
+  color: var(--vscode-inputValidation-warningForeground, #f8f8f8);
+}
+
 .note {
   padding: 8px 10px;
   background: var(--vscode-inputValidation-infoBackground, var(--vscode-textBlockQuote-background, var(--vscode-editor-background)));

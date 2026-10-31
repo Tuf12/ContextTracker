@@ -80,10 +80,8 @@ export function endpointLabel(endpoint: FoundEndpoint): string {
     host = endpoint.value;
   }
   const hint = `${endpoint.keyPath} ${endpoint.value}`.toLowerCase();
-  if (/local|ollama|localhost|127\.0\.0\.1|:11434/.test(hint)) {
-    return `Local model at ${host}`;
-  }
-  return `Model at ${host}`;
+  const kind = /local|ollama|localhost|127\.0\.0\.1|:11434/.test(hint) ? "Local model" : "Model";
+  return `${kind} at ${host} (${endpoint.relativeFile})`;
 }
 
 export function planRewrite(original: string, recorderOrigin: string): { writeValue: string; upstream: string } {

@@ -1,6 +1,7 @@
 import fs from "fs/promises";
 import path from "path";
 import { isInside } from "./paths";
+import { redactText } from "./redact";
 import type { FilePointer, ProjectIndex } from "./types";
 
 const SKIP_DIRS = new Set([
@@ -45,12 +46,25 @@ const EXTENSIONS = new Set([
 ]);
 
 const CLUE_MARKERS = [
+  ":11434",
+  "localhost:11434",
+  "127.0.0.1:11434",
+  "ollamahost",
+  "ollama_host",
+  "ollama_url",
+  "base_url",
+  "baseurl",
+  "api_base",
+  "apibase",
   "api.openai.com",
   "api.anthropic.com",
   "openrouter.ai",
+  "llm.chutes.ai",
+  "api.meta.ai",
   "generativelanguage.googleapis.com",
-  "OPENAI_BASE_URL",
-  "ANTHROPIC_BASE_URL",
+  "openai_base_url",
+  "anthropic_base_url",
+  "ollama_base_url",
 ];
 
 const MAX_FILES = 4000;
@@ -191,8 +205,9 @@ async function readIndexedFile(root: string, absolute: string): Promise<{
     if (isIndexableLine(key)) {
       locations.push({ key, line: index + 1 });
     }
-    if (clues.length < 3 && CLUE_MARKERS.some((marker) => key.includes(marker))) {
-      clues.push({ file: relative, line: index + 1, text: key.slice(0, 160) });
+    const lower = key.toLowerCase();
+    if (clues.length < 3 && CLUE_MARKERS.some((marker) => lower.includes(marker))) {
+      clues.push({ file: relative, line: index + 1, text: redactText(key).slice(0, 160) });
     }
   });
   return { relative, trimmed, locations, clues };

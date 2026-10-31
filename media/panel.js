@@ -105,10 +105,36 @@
 
   function recorderCard() {
     const recorder = state.recorder;
+    const helper = state.helper;
+    const trafficState = recorder.trafficState || (recorder.running ? "listening" : "off");
+    const count = recorder.requestCount || 0;
+    const uptime = recorder.uptimeSeconds || 0;
+
+    let trafficSummary = null;
+    if (recorder.running) {
+      if (trafficState === "active") {
+        trafficSummary = `Traffic active · ${count} request${count === 1 ? "" : "s"} captured (${uptime}s)`;
+      } else if (trafficState === "listening_idle") {
+        trafficSummary = `Listening idle · 0 requests received (${uptime}s)`;
+      } else {
+        trafficSummary = `Listening on port 47321 (${uptime}s)`;
+      }
+    }
+
     return h("section", { class: "card" },
       h("h2", null, "Capture"),
       h("p", null, recorder.running ? "Watching for a message." : "Capture is off."),
-      recorder.found ? h("p", { class: "quiet" }, recorder.found) : null,
+      trafficSummary ? h("p", { class: "quiet", style: "font-weight:600;margin:4px 0;" }, trafficSummary) : null,
+      recorder.missedHint
+        ? h("p", { class: "banner warning", style: "margin:8px 0;" }, recorder.missedHint)
+        : null,
+      recorder.found
+        ? h("div", { class: "spread" },
+            h("p", { class: "quiet", style: "word-break:break-word" }, recorder.found),
+            recorder.running
+              ? null
+              : h("button", { class: "ghost", style: "white-space:nowrap;flex-shrink:0", onClick: send("forgetAddress"), title: "Disconnect this address and let the AI helper search again" }, "Disconnect address"))
+        : null,
       recorder.error ? h("p", { class: "banner" }, recorder.error) : null,
       state.helper && state.helper.busy
         ? h("p", { class: "note" }, recorder.lastEvent || "The AI helper is searching this project for the model address so capture can connect.")
@@ -122,6 +148,12 @@
           : recorder.running
             ? h("button", { class: "secondary", onClick: send("stopCapture") }, "Stop capture")
             : h("button", { class: "primary", onClick: send("startCapture") }, "Start capture"),
+        recorder.running
+          ? h("button", { class: "secondary", onClick: send("troubleshootConnection"), title: "Diagnose why prompts might be bypassing Context Tracker" }, "Troubleshoot Connection")
+          : null,
+        !recorder.running && helper && !helper.busy && (helper.keySaved || !recorder.found)
+          ? h("button", { class: "secondary", onClick: send("findAddress"), title: "Use the AI helper to search the project for the model address" }, "Find address with AI helper")
+          : null,
         h("button", { class: "ghost", onClick: send("showLog") }, "Show log")));
   }
 
@@ -155,11 +187,17 @@
           onInput: (event) => { helperKey = event.target.value; },
         })) : null,
       helper.status ? h("p", { class: helper.busy ? "note" : "quiet" }, helper.status) : null,
+      helper.offer && helper.offer.explanation
+        ? h("p", { class: "banner warning", style: "margin:6px 0;" }, helper.offer.explanation)
+        : null,
       helper.offer ? h("p", { class: "note" }, helper.offer.relativeFile + " line " + helper.offer.line + " · " + helper.offer.url) : null,
       h("div", { class: "row" },
         helper.connectOpen ? h("button", { class: "secondary", onClick: saveHelper }, "Connect") : null,
+        !helper.busy && !state.recorder.running && !helper.offer
+          ? h("button", { class: "secondary", onClick: send("findAddress"), title: "Use the AI helper to search the project for the model address" }, "Find address with AI helper")
+          : null,
         helper.offer
-          ? h("button", { class: "primary", onClick: send("confirmAddress") }, "Use this address")
+          ? h("button", { class: "primary", onClick: send("confirmAddress") }, helper.offer.explanation ? "Switch connection" : "Use this address")
           : null,
         helper.offer
           ? h("button", { class: "ghost", onClick: send("dismissAddress") }, "Not this address")

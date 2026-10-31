@@ -4,7 +4,7 @@ export type HelperTool<T> = {
   name: string;
   description: string;
   parameters: Record<string, unknown>;
-  run: (args: unknown) => { content: string; finish?: T };
+  run: (args: unknown) => { content: string; finish?: T } | Promise<{ content: string; finish?: T }>;
 };
 
 export type HarnessResult<T> = {
@@ -42,7 +42,7 @@ export async function runHarness<T>(options: {
     messages.push({ role: "assistant", content: turn.content, tool_calls: calls });
     for (const call of turn.toolCalls) {
       options.onTool?.(call.name);
-      const outcome = runCall(options.tools, call.name, call.arguments);
+      const outcome = await runCall(options.tools, call.name, call.arguments);
       if (outcome.finish !== undefined) {
         return { finish: outcome.finish, steps };
       }
@@ -52,7 +52,11 @@ export async function runHarness<T>(options: {
   return { finish: null, steps };
 }
 
-function runCall<T>(tools: Array<HelperTool<T>>, name: string, rawArgs: string): { content: string; finish?: T } {
+async function runCall<T>(
+  tools: Array<HelperTool<T>>,
+  name: string,
+  rawArgs: string,
+): Promise<{ content: string; finish?: T }> {
   const tool = tools.find((item) => item.name === name);
   if (!tool) {
     return { content: `Unknown tool ${name}.` };
@@ -63,7 +67,7 @@ function runCall<T>(tools: Array<HelperTool<T>>, name: string, rawArgs: string):
   } catch {
     return { content: "Arguments were not valid JSON." };
   }
-  return tool.run(args);
+  return await tool.run(args);
 }
 
 function openAITool<T>(tool: HelperTool<T>): OpenAITool {

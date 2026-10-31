@@ -5,6 +5,8 @@ export type RouteSettings = {
   customUpstream: string;
 };
 
+export type TrafficState = "off" | "listening" | "listening_idle" | "active";
+
 export type PromptMessage = {
   role: string;
   content: string;
@@ -134,6 +136,10 @@ export type RecorderView = {
   error: string | null;
   lastEvent: string | null;
   found: string | null;
+  trafficState: TrafficState;
+  requestCount: number;
+  uptimeSeconds: number;
+  missedHint: string | null;
 };
 
 export type AddressOffer = {
@@ -141,6 +147,8 @@ export type AddressOffer = {
   line: number;
   url: string;
   reason: string;
+  explanation?: string;
+  previousFile?: string;
 };
 
 export type HelperModelChoice = {
