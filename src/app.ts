@@ -4,16 +4,22 @@ import path from "path";
 import * as vscode from "vscode";
 import { deriveCapture, presentCapture } from "./derive";
 import { ANTHROPIC_ENV, applyEnv, OPENAI_ENV, proposedBases, readEnvStatus, restoreEnv } from "./env";
+import { completeChat, listHelperModels, META_HELPER_BASE, META_MODELS } from "./helperClient";
+import { ADDRESS_SYSTEM, addressTools } from "./helperTools";
+import { runHarness } from "./harness";
 import { panelHtml } from "./html";
 import { indexProject } from "./indexer";
-import { isInside, resolveProjectFile } from "./paths";
+import { isInside, projectKey, resolveAddressFile, resolveProjectFile } from "./paths";
 import { CAPTURE_PORT, chooseUpstream, startRecorder, type RecorderCapture, type RecorderServer } from "./recorder";
-import { armRedirect, chooseEndpoint, endpointLabel, findEndpoints, planRewrite, restoreAllRedirects } from "./redirect";
+import { armRedirect, chooseEndpoint, endpointLabel, findEndpoints, planRewrite, restoreAllRedirects, type FoundEndpoint } from "./redirect";
 import { CaptureStore } from "./store";
-import type { ProjectIndex, ProjectView, ReportedSpan, RouteSettings, StoredCapture, ViewState } from "./types";
+import type { AddressOffer, ProjectIndex, ProjectView, ReportedSpan, RouteSettings, StoredCapture, ViewState } from "./types";
 
 const PROJECT_KEY = "contextTracker.projectPath";
 const ROUTE_KEY = "contextTracker.route";
+const HELPER_MODEL = "contextTracker.helperModel";
+const HELPER_SECRET = "contextTracker.helperApiKey";
+const SAVED_ENDPOINT_PREFIX = "contextTracker.savedEndpoint.";
 
 export class TrackerApp {
   private readonly output: vscode.OutputChannel;
@@ -40,6 +46,14 @@ export class TrackerApp {
   private foundLabel: string | null = null;
   private recorderError: string | null = null;
   private lastEvent: string | null = null;
+  private helperModel = "";
+  private helperKeySaved = false;
+  private helperConnectOpen = false;
+  private helperNeeded = false;
+  private helperBusy = false;
+  private helperStatus: string | null = null;
+  private addressOffer: AddressOffer | null = null;
+  private helperRun = 0;
   private panel: vscode.WebviewPanel | undefined;
   private statusTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -92,6 +106,7 @@ export class TrackerApp {
     await fs.promises.mkdir(this.context.globalStorageUri.fsPath, { recursive: true });
     restoreAllRedirects(this.redirectDir);
     await this.store.init();
+    await this.loadHelperSettings();
     const savedPath = this.context.globalState.get<string>(PROJECT_KEY);
     if (savedPath && fs.existsSync(savedPath)) {
       await this.loadProject(savedPath);
@@ -138,6 +153,27 @@ export class TrackerApp {
         return;
       case "stopCapture":
         await this.stopCapture();
+        return;
+      case "openHelper":
+        this.helperConnectOpen = !this.helperConnectOpen;
+        this.push();
+        return;
+      case "saveHelper":
+        await this.saveHelper(
+          typeof body.model === "string" ? body.model : "",
+          typeof body.apiKey === "string" ? body.apiKey : "",
+        );
+        return;
+      case "findAddress":
+        await this.findAddress();
+        return;
+      case "confirmAddress":
+        await this.confirmAddress();
+        return;
+      case "dismissAddress":
+        this.addressOffer = null;
+        this.helperStatus = "No model address was found in this project.";
+        this.push();
         return;
       case "setRoute":
         await this.setRoute(body.mode === "custom" ? "custom" : "auto", typeof body.customUpstream === "string" ? body.customUpstream : "");
@@ -225,6 +261,10 @@ export class TrackerApp {
     this.selectedId = null;
     this.compare = null;
     this.compareId = null;
+    this.helperNeeded = false;
+    this.addressOffer = null;
+    this.helperRun += 1;
+    this.helperBusy = false;
     this.summaries = await this.store.list(resolved);
     await this.context.globalState.update(PROJECT_KEY, resolved);
     this.refreshStatus();
@@ -256,14 +296,29 @@ export class TrackerApp {
       return;
     }
     restoreAllRedirects(this.redirectDir);
-    const chosen = chooseEndpoint(findEndpoints(this.project.path));
+    let chosen = chooseEndpoint(findEndpoints(this.project.path));
+    if (!chosen) {
+      chosen = this.getSavedEndpoint(this.project.path);
+    }
     if (!chosen) {
       this.foundLabel = null;
       this.recorderError = null;
-      this.lastEvent = "No model address was found in this project.";
-      this.push();
+      this.helperNeeded = true;
+      if (!this.helperKeySaved || !this.helperModel.trim()) {
+        this.lastEvent = "No model address was found. Connect an AI helper above, then press Start capture again.";
+        this.helperConnectOpen = true;
+        this.helperStatus = "Connect an AI helper to find the address.";
+        this.push();
+        return;
+      }
+      this.helperConnectOpen = false;
+      await this.findAddress();
       return;
     }
+    await this.armCapture(chosen);
+  }
+
+  private async armCapture(chosen: FoundEndpoint): Promise<void> {
     const plan = planRewrite(chosen.value, `http://127.0.0.1:${CAPTURE_PORT}`);
     this.route = { mode: "custom", customUpstream: plan.upstream };
     try {
@@ -312,12 +367,149 @@ export class TrackerApp {
       return;
     }
     this.recorderError = null;
+    this.helperNeeded = false;
+    this.addressOffer = null;
     this.foundLabel = endpointLabel(chosen);
-    this.lastEvent = "Capture is on. Close the app and start it again, then send a message. Each later message is kept.";
+    this.lastEvent = `Capture is on. ${chosen.relativeFile} now points at capture. Close the app and start it again, then send a message. A message from an app that is already open is not recorded.`;
     this.output.appendLine(`Routing ${chosen.relativeFile} ${chosen.keyPath} through capture to ${plan.upstream}`);
+    await this.saveConfirmedEndpoint(chosen);
     this.refreshStatus();
     this.push();
     this.openBeside();
+  }
+
+  private async loadHelperSettings(): Promise<void> {
+    const saved = this.context.globalState.get<string>(HELPER_MODEL) ?? "";
+    this.helperModel = META_MODELS.some((item) => item.id === saved) ? saved : "";
+    const key = await this.context.secrets.get(HELPER_SECRET);
+    this.helperKeySaved = Boolean(key && key.trim());
+  }
+
+  private async saveHelper(model: string, apiKey: string): Promise<void> {
+    const chosen = META_MODELS.find((item) => item.id === model.trim());
+    if (!chosen) {
+      this.helperStatus = "Choose a Meta model.";
+      this.helperConnectOpen = true;
+      this.push();
+      return;
+    }
+    const previousKey = await this.context.secrets.get(HELPER_SECRET);
+    const nextKey = apiKey.trim() || previousKey || "";
+    if (!nextKey) {
+      this.helperStatus = "Add an API key.";
+      this.helperConnectOpen = true;
+      this.push();
+      return;
+    }
+    try {
+      await listHelperModels({ baseUrl: META_HELPER_BASE, apiKey: nextKey });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      this.helperStatus = message === "The helper host rejected the API key."
+        ? "Meta rejected that API key."
+        : "Meta could not be reached.";
+      this.helperConnectOpen = true;
+      this.push();
+      return;
+    }
+    await this.context.secrets.store(HELPER_SECRET, nextKey);
+    this.helperKeySaved = true;
+    this.helperModel = chosen.id;
+    await this.context.globalState.update(HELPER_MODEL, this.helperModel);
+    this.helperConnectOpen = true;
+    this.helperStatus = `AI helper is ${chosen.label}.`;
+    this.push();
+  }
+
+  private async findAddress(): Promise<void> {
+    if (!this.project || this.helperBusy || this.server) {
+      return;
+    }
+    const apiKey = await this.context.secrets.get(HELPER_SECRET);
+    if (!apiKey?.trim() || !this.helperModel) {
+      this.helperStatus = "Connect an AI helper and choose a Meta model first.";
+      this.push();
+      return;
+    }
+    const run = ++this.helperRun;
+    const projectPath = this.project.path;
+    const searching = "The AI helper is searching this project for the model address so capture can connect.";
+    this.helperBusy = true;
+    this.addressOffer = null;
+    this.helperStatus = searching;
+    this.lastEvent = searching;
+    this.status.text = "$(loading~spin) AI helper is searching";
+    this.status.tooltip = searching;
+    this.status.show();
+    this.push();
+    try {
+      const result = await runHarness({
+        system: ADDRESS_SYSTEM,
+        user: "Find the HTTP address this project uses to call a model.",
+        tools: addressTools(projectPath),
+        stepCap: 16,
+        complete: (messages, tools) => completeChat({
+          baseUrl: META_HELPER_BASE,
+          apiKey,
+          model: this.helperModel,
+          messages,
+          tools,
+        }),
+        onTool: (name) => {
+          if (run !== this.helperRun) {
+            return;
+          }
+          const step = helperStepLabel(name);
+          this.helperStatus = step;
+          this.lastEvent = step;
+          this.push();
+        },
+      });
+      if (run !== this.helperRun) {
+        return;
+      }
+      if (!result.finish) {
+        this.helperStatus = `The AI helper reached the search limit (${result.steps} steps) without an address. Click Start capture again to retry.`;
+        this.lastEvent = this.helperStatus;
+      } else {
+        this.addressOffer = result.finish;
+        this.helperStatus = "The AI helper found a model address. Confirm it above to start capture.";
+        this.lastEvent = this.helperStatus;
+      }
+    } catch (error) {
+      if (run !== this.helperRun) {
+        return;
+      }
+      this.helperStatus = error instanceof Error ? error.message : "The helper model could not be reached.";
+      this.lastEvent = this.helperStatus;
+    } finally {
+      if (run === this.helperRun) {
+        this.helperBusy = false;
+        this.refreshStatus();
+        this.push();
+      }
+    }
+  }
+
+  private async confirmAddress(): Promise<void> {
+    if (!this.project || !this.addressOffer || this.server) {
+      return;
+    }
+    const offer = this.addressOffer;
+    const filePath = resolveAddressFile(this.project.path, offer.relativeFile);
+    if (!filePath) {
+      this.helperStatus = "That file is not in the project.";
+      this.push();
+      return;
+    }
+    await this.armCapture({
+      projectPath: this.project.path,
+      filePath,
+      relativeFile: offer.relativeFile,
+      line: offer.line,
+      keyPath: "helper",
+      value: offer.url,
+    });
   }
 
   private async stopCapture(): Promise<void> {
@@ -337,8 +529,40 @@ export class TrackerApp {
     if (!this.project || this.server) {
       return;
     }
-    const chosen = chooseEndpoint(findEndpoints(this.project.path));
+    const chosen = chooseEndpoint(findEndpoints(this.project.path)) ?? this.getSavedEndpoint(this.project.path);
     this.foundLabel = chosen ? endpointLabel(chosen) : null;
+  }
+
+  private getSavedEndpoint(projectPath: string): FoundEndpoint | null {
+    const key = SAVED_ENDPOINT_PREFIX + projectKey(projectPath);
+    const saved = this.context.globalState.get<FoundEndpoint>(key);
+    if (!saved || typeof saved !== "object" || !saved.filePath || !saved.value) {
+      return null;
+    }
+    const filePath = resolveAddressFile(projectPath, saved.filePath);
+    if (!filePath || !fs.existsSync(filePath)) {
+      return null;
+    }
+    try {
+      const content = fs.readFileSync(filePath, "utf8");
+      const lines = content.split(/\r?\n/);
+      const idx = lines.findIndex((line) => line.includes(saved.value));
+      if (idx < 0) {
+        return null;
+      }
+      return {
+        ...saved,
+        filePath,
+        line: idx + 1,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private async saveConfirmedEndpoint(endpoint: FoundEndpoint): Promise<void> {
+    const key = SAVED_ENDPOINT_PREFIX + projectKey(endpoint.projectPath);
+    await this.context.globalState.update(key, endpoint);
   }
 
   private async setRoute(mode: RouteSettings["mode"], customUpstream: string): Promise<void> {
@@ -590,10 +814,10 @@ export class TrackerApp {
 
   private openBeside(): void {
     if (this.panel) {
-      this.panel.reveal(vscode.ViewColumn.Beside);
+      this.panel.reveal();
       return;
     }
-    this.panel = vscode.window.createWebviewPanel("contextTracker.editor", "Context Tracker", vscode.ViewColumn.Beside, {
+    this.panel = vscode.window.createWebviewPanel("contextTracker.editor", "Context Tracker", vscode.ViewColumn.Active, {
       enableScripts: true,
       retainContextWhenHidden: true,
       localResourceRoots: [this.context.extensionUri],
@@ -643,6 +867,16 @@ export class TrackerApp {
         lastEvent: this.lastEvent,
         found: this.foundLabel,
       },
+      helper: {
+        model: this.helperModel,
+        choices: META_MODELS,
+        keySaved: this.helperKeySaved,
+        connectOpen: this.helperConnectOpen,
+        needed: this.helperNeeded && !this.server,
+        busy: this.helperBusy,
+        status: this.helperStatus,
+        offer: this.addressOffer,
+      },
       env: this.project ? readEnvStatus(this.project.path, url, this.backupDir) : null,
       captures: this.summaries,
       selectedId: selected ? this.selectedId : null,
@@ -658,4 +892,20 @@ export class TrackerApp {
       void webview.postMessage({ type: "state", state });
     }
   }
+}
+
+function helperStepLabel(name: string): string {
+  if (name === "list_files") {
+    return "The AI helper is listing project files to find the model address.";
+  }
+  if (name === "search_text") {
+    return "The AI helper is searching the project for the model address.";
+  }
+  if (name === "read_file") {
+    return "The AI helper is reading a project file to find the model address.";
+  }
+  if (name === "propose_address") {
+    return "The AI helper is checking a model address it found.";
+  }
+  return "The AI helper is connecting this project to capture.";
 }

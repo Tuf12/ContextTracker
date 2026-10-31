@@ -6,6 +6,8 @@
   let selectedSpan = null;
   let seenCapture = null;
   let scrollTop = 0;
+  let helperChoice = null;
+  let helperKey = "";
 
   const SPAN_EXAMPLE = [
     "{",
@@ -82,7 +84,7 @@
   function header(surface) {
     return h("div", { class: "spread" },
       h("h1", null, "Context Tracker"),
-      surface === "sidebar" ? h("button", { class: "secondary", onClick: send("openBeside") }, "Open beside editor") : null);
+      surface === "sidebar" ? h("button", { class: "secondary", onClick: send("openBeside") }, "Open in editor tab") : null);
   }
 
   function projectCard() {
@@ -96,7 +98,9 @@
         h("button", { class: "ghost", onClick: send("openProject") }, "Change")),
       h("p", { class: "path" }, project.path),
       h("p", { class: "quiet", id: "file-count" }, count),
-      project.indexing ? null : h("button", { class: "ghost", onClick: send("reindex") }, "Index again"));
+      project.indexing ? null : h("button", { class: "ghost", onClick: send("reindex") }, "Index again"),
+      h("button", { class: "secondary", onClick: send("openHelper") }, helperButtonLabel(state.helper)),
+      state.helper && helperVisible(state.helper) ? helperCard(state.helper) : null);
   }
 
   function recorderCard() {
@@ -106,15 +110,65 @@
       h("p", null, recorder.running ? "Watching for a message." : "Capture is off."),
       recorder.found ? h("p", { class: "quiet" }, recorder.found) : null,
       recorder.error ? h("p", { class: "banner" }, recorder.error) : null,
-      h("p", { class: "note" }, recorder.running
-        ? "Launch the app after Start capture. An app that was already open keeps its old address, and messages from it are missed. Each message after that launch is kept."
-        : "Turn Start capture on before you launch the app. Launching the app first misses the message. If the app is already open, turn this on, close the app, and launch it again."),
-      recorder.lastEvent ? h("p", { class: "quiet" }, recorder.lastEvent) : null,
+      state.helper && state.helper.busy
+        ? h("p", { class: "note" }, recorder.lastEvent || "The AI helper is searching this project for the model address so capture can connect.")
+        : h("p", { class: "note" }, recorder.running
+          ? "Launch the app after Start capture. An app that was already open keeps its old address, so its message never reaches capture and no error is shown. Each message after that launch is kept."
+          : "Capture is off, so a message sent now is not recorded and the app will not show an error. Turn Start capture on, then close the app and launch it again."),
+      state.helper && state.helper.busy ? null : recorder.lastEvent ? h("p", { class: "quiet" }, recorder.lastEvent) : null,
       h("div", { class: "row" },
-        recorder.running
-          ? h("button", { class: "secondary", onClick: send("stopCapture") }, "Stop capture")
-          : h("button", { class: "primary", onClick: send("startCapture") }, "Start capture"),
+        state.helper && state.helper.busy
+          ? h("button", { class: "primary", disabled: true }, "AI helper is working…")
+          : recorder.running
+            ? h("button", { class: "secondary", onClick: send("stopCapture") }, "Stop capture")
+            : h("button", { class: "primary", onClick: send("startCapture") }, "Start capture"),
         h("button", { class: "ghost", onClick: send("showLog") }, "Show log")));
+  }
+
+  function helperButtonLabel(helper) {
+    if (helper && helper.keySaved && helper.model) {
+      const choice = (helper.choices || []).find((item) => item.id === helper.model);
+      return "AI helper: " + (choice ? choice.label : "Meta");
+    }
+    return "Connect AI helper";
+  }
+
+  function helperVisible(helper) {
+    return helper.connectOpen || helper.offer || helper.busy || (helper.needed && !helper.keySaved);
+  }
+
+  function helperCard(helper) {
+    if (!helperChoice && helper.model) {
+      helperChoice = helper.model;
+    }
+    const choices = helper.choices || [];
+    return h("div", { class: "stack" },
+      helper.connectOpen ? h("p", { class: "quiet" }, "The API key stays in the editor and is sent only to Meta. Muse Spark 1.3 Contributor is the lower-cost choice. Meta may use what that helper reads to train future models.") : null,
+      helper.connectOpen ? h("label", { class: "field" }, "Meta model",
+        h("select", { onChange: (event) => { helperChoice = event.target.value; } },
+          h("option", { value: "", selected: !helperChoice }, "Choose a Meta model"),
+          ...choices.map((choice) => h("option", { value: choice.id, selected: choice.id === helperChoice }, choice.label)))) : null,
+      helper.connectOpen ? h("label", { class: "field" }, helper.keySaved ? "API key saved. Enter a new key to replace it." : "API key",
+        h("input", {
+          type: "password",
+          value: helperKey,
+          onInput: (event) => { helperKey = event.target.value; },
+        })) : null,
+      helper.status ? h("p", { class: helper.busy ? "note" : "quiet" }, helper.status) : null,
+      helper.offer ? h("p", { class: "note" }, helper.offer.relativeFile + " line " + helper.offer.line + " · " + helper.offer.url) : null,
+      h("div", { class: "row" },
+        helper.connectOpen ? h("button", { class: "secondary", onClick: saveHelper }, "Connect") : null,
+        helper.offer
+          ? h("button", { class: "primary", onClick: send("confirmAddress") }, "Use this address")
+          : null,
+        helper.offer
+          ? h("button", { class: "ghost", onClick: send("dismissAddress") }, "Not this address")
+          : null));
+  }
+
+  function saveHelper() {
+    post({ type: "saveHelper", model: helperChoice || "", apiKey: helperKey });
+    helperKey = "";
   }
 
   function captureCard() {
@@ -152,7 +206,8 @@
           h("span", null, when),
           h("span", { class: "meta" }, status)),
         h("div", null, capture.model),
-        h("div", { class: "quiet" }, capture.preview)),
+        h("div", { class: "quiet" },
+          (capture.fileSpanCount > 0 ? capture.fileSpanCount + " source links · " : "") + capture.preview)),
       state.captures.length > 1 && capture.id !== state.selectedId
         ? h("button", { class: "ghost", onClick: () => post({ type: "pinCapture", id: capture.id }) }, pinned ? "Unpin" : "Pin")
         : null);
@@ -192,7 +247,9 @@
         capture.status ? "HTTP " + capture.status : "No HTTP status",
       ].join(" · ")),
       capture.error ? h("p", { class: "banner" }, capture.error) : null,
-      h("p", { class: "quiet" }, "About " + capture.estimatedTokens.toLocaleString("en-US") + " tokens in the prompt · characters ÷ 4"),
+      h("p", { class: "quiet" },
+        "About " + capture.estimatedTokens.toLocaleString("en-US") + " tokens in the prompt · " +
+        (capture.fileSpanCount > 0 ? (capture.fileSpanCount + " sections matched to project files") : "No matching source files")),
       bar(capture, spans),
       ...capture.messages.map((message) => renderMessage(capture, message)),
       h("section", { class: "reply" },
@@ -229,9 +286,9 @@
           onClick: () => focusSpan(capture, span.id),
         }))),
       h("div", { class: "legend" },
-        hasFile ? legend("bar-file", "Matched in the project") : null,
+        hasFile ? legend("bar-file", "Matched in the project (click to open file)") : null,
         hasReported ? legend("bar-reported", "Marked by your app") : null,
-        hasRuntime ? legend("bar-runtime", "No file") : null,
+        hasRuntime ? legend("bar-runtime", "Dynamic / conversation text") : null,
         h("span", { class: "quiet" }, total.toLocaleString("en-US") + " characters")));
   }
 
@@ -324,6 +381,8 @@
           node.checked = true;
         } else if (key === "value" && (tag === "input" || tag === "textarea")) {
           node.value = value;
+        } else if (key === "selected" && tag === "option") {
+          node.selected = true;
         } else if (key.startsWith("on") && typeof value === "function") {
           node.addEventListener(key.slice(2).toLowerCase(), value);
         } else {

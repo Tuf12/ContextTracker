@@ -1,6 +1,6 @@
 import fs from "fs";
 import path from "path";
-import { isInside, projectKey } from "./paths";
+import { isRewritablePath, projectKey } from "./paths";
 
 export type FoundEndpoint = {
   projectPath: string;
@@ -137,7 +137,7 @@ export function restoreAllRedirects(backupDir: string): void {
     if (!parsed || typeof parsed.content !== "string" || typeof parsed.filePath !== "string" || typeof parsed.projectPath !== "string") {
       continue;
     }
-    if (!isInside(parsed.projectPath, parsed.filePath)) {
+    if (!isRewritablePath(parsed.projectPath, parsed.filePath)) {
       continue;
     }
     try {

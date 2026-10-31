@@ -26,7 +26,10 @@ export function deriveMessageSpans(
   reported: ReportedSpan[],
 ): ViewSpan[] {
   const fileSpans = index
-    ? combineSpans(placeReported(content, reported, index), matchContent(content, index))
+    ? combineSpans(
+        placeReported(content, reported, index),
+        role === "tools" ? matchTools(content, index) : matchContent(content, index),
+      )
     : placeReported(content, reported, index);
   return toViewSpans(content, role, fileSpans, index);
 }
@@ -388,4 +391,58 @@ function isFiniteNumber(value: unknown): value is number {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Math.trunc(value)));
+}
+
+function matchTools(content: string, index: ProjectIndex): FileSpan[] {
+  const spans: FileSpan[] = [];
+  const regex = /\{\s*"type":\s*"function"[\s\S]*?"function":\s*\{[\s\S]*?"name":\s*"([^"]+)"[\s\S]*?\n\}/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(content)) !== null) {
+    const toolName = match[1];
+    const charStart = match.index;
+    const charEnd = match.index + match[0].length;
+    const hit = findToolDefinition(toolName, index);
+    if (hit) {
+      spans.push({
+        charStart,
+        charEnd,
+        file: hit.file,
+        startLine: hit.line,
+        endLine: hit.line,
+        source: "matched",
+      });
+    }
+  }
+  return spans;
+}
+
+function findToolDefinition(name: string, index: ProjectIndex): Hit | null {
+  const nameRegexes = [
+    new RegExp(`\\b${name}\\s*:\\s*\\{`),
+    new RegExp(`\\bfunction\\s+${name}\\b`),
+    new RegExp(`\\bdef\\s+${name}\\b`),
+    new RegExp(`["']name["']\\s*:\\s*["']${name}["']`),
+    new RegExp(`\\bname\\s*:\\s*["']${name}["']`),
+  ];
+  let fallback: Hit | null = null;
+  for (const [file, lines] of index.fileLines.entries()) {
+    const lowerFile = file.toLowerCase();
+    if (lowerFile.includes("test") || lowerFile.includes("spec") || lowerFile.endsWith(".md")) {
+      continue;
+    }
+    const isPreferredFile = /tool|catalog|schema/.test(lowerFile);
+    for (let idx = 0; idx < lines.length; idx++) {
+      const line = lines[idx];
+      if (nameRegexes.some((regex) => regex.test(line))) {
+        const hit = { file, line: idx + 1 };
+        if (isPreferredFile) {
+          return hit;
+        }
+        if (!fallback) {
+          fallback = hit;
+        }
+      }
+    }
+  }
+  return fallback;
 }

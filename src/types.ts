@@ -136,9 +136,33 @@ export type RecorderView = {
   found: string | null;
 };
 
+export type AddressOffer = {
+  relativeFile: string;
+  line: number;
+  url: string;
+  reason: string;
+};
+
+export type HelperModelChoice = {
+  id: string;
+  label: string;
+};
+
+export type HelperView = {
+  model: string;
+  choices: HelperModelChoice[];
+  keySaved: boolean;
+  connectOpen: boolean;
+  needed: boolean;
+  busy: boolean;
+  status: string | null;
+  offer: AddressOffer | null;
+};
+
 export type ViewState = {
   project: ProjectView | null;
   recorder: RecorderView;
+  helper: HelperView;
   env: EnvStatus | null;
   captures: CaptureSummary[];
   selectedId: string | null;

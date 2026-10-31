@@ -1,0 +1,15 @@
+Reviewed it — very helpful. Here's how it maps to your questions:
+
+  Meta-only or pluggable?
+
+  You don't need to limit to Meta-only, and I don't think pluggable hurts you. But two judging lines matter:
+
+  • Stage 1 is pass/fail on "reasonably used Meta Model API and/or Meta's open-weight models." So Meta usage has to be obvious and central, not a hidden fallback.
+  • "Use of Meta AI Tooling" is 25%, and asks if you went beyond a basic integration.
+
+  So the safe play: Meta Model API is the default brain and the star of the demo, other providers are just a settings option. That scores creativity + keeps your
+  "works with anything" story. Your $7 chess game story fits Build for Your World perfectly — problem you know firsthand.
+
+  Also relevant: there's a $5K Best Agentic Use-Case bonus. Our auto-analyze → propose diff → install tracer flow is a direct fit for that. I'd lean into it in the
+  video.
+
