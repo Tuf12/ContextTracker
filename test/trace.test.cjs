@@ -9,7 +9,7 @@ const { extractReply, looksLikeGeneration, normalizeRequest } = require("../out/
 const { applyEnv, readEnvStatus, restoreEnv, rewriteEnv } = require("../out/env.js");
 const { chooseUpstream, providerFor, upstreamUrl } = require("../out/recorder.js");
 const { armRedirect, chooseEndpoint, findEndpoints, planRewrite, restoreAllRedirects } = require("../out/redirect.js");
-const { CaptureStore, extractCleanQuote, matchCachedAttribution, hashPromptText } = require("../out/store.js");
+const { CaptureStore, extractCleanQuote, extractCleanQuotes, extractInvariantPrefix, matchCachedAttribution, hashPromptText } = require("../out/store.js");
 const { deriveCapture, presentCapture } = require("../out/derive.js");
 
 const REFUND = [
@@ -541,6 +541,94 @@ test("CaptureStore manages persistent project attributions across captures and r
   assert.equal(seeded.some((a) => a.file === "src/bot.ts"), true);
   assert.equal(seeded.some((a) => a.file === "desktop/src/core/domain/eidos.ts"), true);
 });
+
+test("Dynamic RAG and code snippet attributions match subsequent captures and back-propagate", async () => {
+  const storeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ct-store-rag-attr-"));
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ct-project-rag-attr-"));
+  const store = new CaptureStore(storeRoot);
+  await store.init();
+
+  const codeSnippet = 'append("\\n\\nRelevant passages from the World English Bible. ")';
+  const cleanQuotes = extractCleanQuotes(codeSnippet);
+  assert.ok(cleanQuotes.includes("Relevant passages from the World English Bible."));
+
+  const personaHeader = "You are a knowledgeable and thoughtful Bible study assistant. Help the user understand Scripture.";
+  const promptTurn1 = `${personaHeader}\n\nRelevant passages from the World English Bible:\n- Luke 22:68 - and if I ask...\n\nGround your answer.`;
+  const promptTurn2 = `${personaHeader}\n\nRelevant passages from the World English Bible:\n- John 11:22 - Even now I know...\n\nGround your answer.`;
+
+  const invariantPrefix = extractInvariantPrefix(promptTurn1);
+  assert.equal(invariantPrefix, personaHeader);
+
+  // Capture 1: attributed with code snippet
+  const cap1 = {
+    id: "cap-turn-1",
+    clientRequestId: null,
+    projectPath: projectRoot,
+    createdAt: new Date().toISOString(),
+    provider: "custom",
+    upstream: "https://api.moonshot.ai",
+    endpoint: "/v1/chat/completions",
+    model: "kimi-k2.6",
+    status: 200,
+    error: null,
+    messages: [{ role: "system", content: promptTurn1 }],
+    reply: "Turn 1 answer",
+    reported: [
+      {
+        messageIndex: 0,
+        file: "app/src/main/java/com/example/PromptBuilder.kt",
+        startLine: 121,
+        endLine: 149,
+        source: "attributed",
+        confidence: 0.98,
+        explanation: "Matches PromptBuilder.buildSystemContent",
+        quote: codeSnippet,
+      },
+    ],
+  };
+
+  // Capture 2: initially un-attributed (e.g. fresh arrival)
+  const cap2 = {
+    id: "cap-turn-2",
+    clientRequestId: null,
+    projectPath: projectRoot,
+    createdAt: new Date().toISOString(),
+    provider: "custom",
+    upstream: "https://api.moonshot.ai",
+    endpoint: "/v1/chat/completions",
+    model: "kimi-k2.6",
+    status: 200,
+    error: null,
+    messages: [{ role: "system", content: promptTurn2 }],
+    reply: "Turn 2 answer",
+    reported: [],
+  };
+
+  await store.add(cap1);
+  await store.add(cap2);
+
+  // Seed attributions and back-propagate
+  const seeded = await store.seedAttributionsFromCaptures(projectRoot);
+  assert.ok(seeded.length > 0);
+  assert.equal(seeded[0].file, "app/src/main/java/com/example/PromptBuilder.kt");
+
+  // Verify matchCachedAttribution matches Turn 2
+  const match = matchCachedAttribution(promptTurn2, seeded);
+  assert.ok(match, "Turn 2 must match cached attribution from Turn 1");
+  assert.equal(match.file, "app/src/main/java/com/example/PromptBuilder.kt");
+
+  // Verify Capture 2 on disk was back-propagated and has the reported span
+  const reloadedCap2 = await store.get(projectRoot, "cap-turn-2");
+  assert.ok(reloadedCap2);
+  assert.equal(reloadedCap2.reported.length, 1);
+  assert.equal(reloadedCap2.reported[0].source, "attributed");
+  assert.equal(reloadedCap2.reported[0].file, "app/src/main/java/com/example/PromptBuilder.kt");
+
+  // Verify deriveCapture produces an attributed file span on Turn 2
+  const view = deriveCapture(reloadedCap2, null);
+  assert.equal(view.messages[0].spans.some((s) => s.kind === "file"), true);
+});
+
 
 
 

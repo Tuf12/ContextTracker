@@ -942,6 +942,42 @@ body[data-surface="editor"] .helper-feed {
   font-size: 11px;
 }
 
+/* Mobile & Android Device Bridging (Loop 7) */
+.badge-mobile {
+  background: color-mix(in srgb, #3ddc84 12%, transparent);
+  color: #3ddc84;
+  border: 1px solid color-mix(in srgb, #3ddc84 32%, transparent);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.badge-mobile.badge-mobile-active {
+  background: color-mix(in srgb, #3ddc84 22%, transparent);
+  color: #a7f3d0;
+  border-color: #3ddc84;
+}
+
+.badge-mobile-idle {
+  background: color-mix(in srgb, var(--vscode-foreground, #d4d4d4) 10%, transparent);
+  color: var(--vscode-descriptionForeground);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 10px;
+}
+
+.mobile-security-card {
+  border-left: 3px solid #f59e0b;
+}
+
+.mobile-stale-card {
+  border-left: 3px solid #38bdf8;
+}
+
 .helper-sidebar-card {
   padding: 8px 10px;
   border-radius: 6px;

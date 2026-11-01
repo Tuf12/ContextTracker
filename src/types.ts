@@ -30,6 +30,8 @@ export type CachedAttribution = {
   fingerprint: string;
   quote?: string;
   cleanQuote?: string;
+  cleanQuotes?: string[];
+  invariantPrefix?: string;
   file: string;
   startLine: number;
   endLine: number;
@@ -147,6 +149,17 @@ export type ProjectView = {
   clues: { file: string; line: number; text: string }[];
 };
 
+export type AndroidViewInfo = {
+  isAndroid: boolean;
+  deviceLabel?: string;
+  bridged: boolean;
+  cleartextPermitted: boolean;
+  securityRisk?: string;
+  remediationSnippet?: string;
+  isStale: boolean;
+  staleSummary?: string;
+};
+
 export type RecorderView = {
   running: boolean;
   url: string | null;
@@ -161,6 +174,7 @@ export type RecorderView = {
   requestCount: number;
   uptimeSeconds: number;
   missedHint: string | null;
+  mobile?: AndroidViewInfo;
 };
 
 export type AddressOffer = {
@@ -273,4 +287,50 @@ export type ContextSection = {
   turns?: number;
   preview: string;
 };
+
+export type AndroidDevice = {
+  serial: string;
+  type: "emulator" | "physical";
+  model?: string;
+  product?: string;
+  state: string;
+};
+
+export type AndroidEnvironment = {
+  available: boolean;
+  adbPath: string | null;
+  devices: AndroidDevice[];
+  defaultStrategy: "adb_reverse" | "emulator_gateway" | "none";
+  summary: string;
+};
+
+export type AndroidBridgeResult = {
+  success: boolean;
+  bridgedDevices: string[];
+  forwardingRule: string;
+  verification: "active" | "failed" | "unverified";
+  error?: string;
+};
+
+export type AndroidSecurityResult = {
+  cleartextPermitted: boolean;
+  manifestFound: boolean;
+  manifestPath?: string;
+  usesCleartextTraffic?: boolean | null;
+  networkSecurityConfigPath?: string;
+  configAllowsLocalhost?: boolean;
+  risk?: string;
+  remediation?: string;
+};
+
+export type AndroidBuildStateResult = {
+  isAndroidProject: boolean;
+  hasBuildArtifacts: boolean;
+  latestArtifactPath?: string;
+  latestArtifactMtime?: number;
+  sourceMtime?: number;
+  isStale: boolean;
+  summary: string;
+};
+
 

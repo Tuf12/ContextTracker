@@ -22,6 +22,7 @@ export class TrafficWatchdog {
   private idleTimeoutSeconds: number;
   private activityIdleSeconds: number;
   private onStateChange?: (state: TrafficState, hint: string | null) => void;
+  private projectContext?: { isAndroid?: boolean; isStale?: boolean };
 
   constructor(options?: WatchdogOptions) {
     this.upstream = options?.upstream || "upstream";
@@ -32,6 +33,10 @@ export class TrafficWatchdog {
 
   setUpstream(upstream: string): void {
     this.upstream = upstream;
+  }
+
+  setProjectContext(context?: { isAndroid?: boolean; isStale?: boolean }): void {
+    this.projectContext = context;
   }
 
   start(now = Date.now()): void {
@@ -99,7 +104,13 @@ export class TrafficWatchdog {
   private transitionToIdle(elapsed: number, trigger: "silence" | "activity" | "manual"): void {
     this.state = "listening_idle";
     const sec = Math.floor(elapsed);
-    if (trigger === "silence") {
+    if (this.projectContext?.isAndroid) {
+      if (this.projectContext.isStale) {
+        this.missedHint = `No requests on port 47321 after ${sec}s. Your Android APK may be older than the redirected source file. Re-run or rebuild in Android Studio.`;
+      } else {
+        this.missedHint = `No requests on port 47321 after ${sec}s. For physical Android devices or emulators, ensure port 47321 is bridged via ADB. Click Troubleshoot Connection.`;
+      }
+    } else if (trigger === "silence") {
       this.missedHint = `Still no requests on port 47321 after ${sec}s. Launch your app and send a prompt; if traffic still does not appear, use Troubleshoot Connection.`;
     } else {
       this.missedHint = `No prompts arrived after ${sec}s. If your app sent messages that didn't appear, it may still be pointing directly to ${this.upstream} instead of port 47321.`;

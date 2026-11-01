@@ -12,7 +12,7 @@ import { indexProject } from "./indexer";
 import { isHomeConfigPath, isInside, projectKey, resolveAddressFile, resolveProjectFile } from "./paths";
 import { CAPTURE_PORT, chooseUpstream, startRecorder, type RecorderCapture, type RecorderServer } from "./recorder";
 import { armRedirect, chooseEndpoint, endpointLabel, findEndpoints, planRewrite, restoreAllRedirects, type FoundEndpoint } from "./redirect";
-import { CaptureStore, extractCleanQuote, hashPromptText, matchCachedAttribution } from "./store";
+import { CaptureStore, extractCleanQuote, extractCleanQuotes, extractInvariantPrefix, hashPromptText, matchCachedAttribution } from "./store";
 import {
   applyTelemetryResponse,
   buildDeterministicTelemetry,
@@ -22,7 +22,32 @@ import {
   parseTelemetryResponse,
   TELEMETRY_SYSTEM,
 } from "./telemetry";
-import type { AddressOffer, AttributedSpan, CachedAttribution, CaptureTelemetry, HelperActivityItem, HelperActivityKind, ProjectIndex, ProjectView, ReportedSpan, RouteSettings, StoredCapture, ViewState } from "./types";
+import {
+  bridgeAndroidDevice,
+  checkAndroidBuildState,
+  detectAndroidEnvironment,
+  diagnoseAndroidConnection,
+  inspectAndroidSecurity,
+  isAndroidProject,
+  removeAndroidBridge,
+} from "./android";
+import type {
+  AddressOffer,
+  AndroidEnvironment,
+  AndroidSecurityResult,
+  AndroidViewInfo,
+  AttributedSpan,
+  CachedAttribution,
+  CaptureTelemetry,
+  HelperActivityItem,
+  HelperActivityKind,
+  ProjectIndex,
+  ProjectView,
+  ReportedSpan,
+  RouteSettings,
+  StoredCapture,
+  ViewState,
+} from "./types";
 import { TrafficWatchdog } from "./watchdog";
 
 const PROJECT_KEY = "contextTracker.projectPath";
@@ -69,6 +94,8 @@ export class TrackerApp {
   private helperBusy = false;
   private helperStatus: string | null = null;
   private addressOffer: AddressOffer | null = null;
+  private activeAndroidDevice: string | null = null;
+  private activeAndroidBridge = false;
   private helperRun = 0;
   private helperActivity: HelperActivityItem[] = [];
   private panel: vscode.WebviewPanel | undefined;
@@ -132,6 +159,7 @@ export class TrackerApp {
     clearTimeout(this.statusTimer);
     this.watchdog.stop();
     restoreAllRedirects(this.redirectDir);
+    void removeAndroidBridge().catch(() => undefined);
     void this.server?.close().catch(() => undefined);
     this.server = null;
     this.panel?.dispose();
@@ -272,6 +300,13 @@ export class TrackerApp {
       case "copyUrl":
         await this.copyUrl(body.which === "anthropic" ? "anthropic" : "openai");
         return;
+      case "copyText":
+        if (typeof body.text === "string" && body.text) {
+          await vscode.env.clipboard.writeText(body.text);
+          this.lastEvent = "Copied to clipboard.";
+          this.push();
+        }
+        return;
       case "showLog":
         this.output.show(true);
         return;
@@ -358,6 +393,17 @@ export class TrackerApp {
       clues: index.clues,
     };
     this.refreshFoundLabel();
+    if (isAndroidProject(resolved)) {
+      void detectAndroidEnvironment().then((env) => {
+        if (env.available) {
+          const active = env.devices.filter((d) => d.state === "device");
+          if (active.length > 0) {
+            this.activeAndroidDevice = active.map((d) => d.model || d.serial).join(", ");
+            this.push();
+          }
+        }
+      }).catch(() => undefined);
+    }
     this.push();
   }
 
@@ -450,6 +496,25 @@ export class TrackerApp {
     this.foundLabel = endpointLabel(chosen);
     this.currentEndpoint = chosen;
     this.watchdog.setUpstream(plan.upstream);
+
+    const buildState = checkAndroidBuildState(chosen.projectPath, chosen.filePath);
+    if (buildState.isAndroidProject) {
+      this.watchdog.setProjectContext({ isAndroid: true, isStale: buildState.isStale });
+      void bridgeAndroidDevice({}).then((res) => {
+        if (res.success && res.bridgedDevices.length > 0) {
+          this.activeAndroidBridge = true;
+          this.activeAndroidDevice = res.bridgedDevices.join(", ");
+          this.output.appendLine(`[Android Bridge] Bridged port 47321 to device(s): ${res.bridgedDevices.join(", ")}`);
+          this.push();
+        }
+      }).catch(() => undefined);
+      if (buildState.isStale) {
+        this.output.appendLine(`[Android Build] Note: ${buildState.summary}`);
+      }
+    } else {
+      this.watchdog.setProjectContext(undefined);
+    }
+
     this.watchdog.start();
     this.lastEvent = `Capture is on. ${chosen.relativeFile} now points at capture. Close the app and start it again, then send a message. A message from an app that is already open is not recorded.`;
     this.output.appendLine(`Routing ${chosen.relativeFile} ${chosen.keyPath} through capture to ${plan.upstream}`);
@@ -649,6 +714,8 @@ export class TrackerApp {
     if (server) {
       await server.close().catch(() => undefined);
     }
+    await removeAndroidBridge().catch(() => undefined);
+    this.activeAndroidBridge = false;
     restoreAllRedirects(this.redirectDir);
     this.refreshFoundLabel();
     this.lastEvent = "Capture is off, and the model address is restored.";
@@ -690,12 +757,37 @@ export class TrackerApp {
     this.push();
 
     try {
+      let androidEnvironment: AndroidEnvironment | undefined;
+      let securityFindings: AndroidSecurityResult | undefined;
+      let buildArtifactStatus: string | undefined;
+
+      try {
+        const fullSourcePath = failedEndpoint.relativeFile ? resolveAddressFile(project.path, failedEndpoint.relativeFile) : undefined;
+        const diag = await diagnoseAndroidConnection({
+          projectRoot: project.path,
+          sourceFilePath: fullSourcePath || undefined,
+        });
+        if (diag.isAndroid) {
+          androidEnvironment = diag.env;
+          securityFindings = diag.security;
+          buildArtifactStatus = diag.buildState.summary;
+          if (diag.repairedBridge && diag.repairedBridge.success) {
+            this.output.appendLine(`[Android Bridge] Re-established bridge for ${diag.repairedBridge.bridgedDevices.join(", ")}`);
+          }
+        }
+      } catch {
+        // Non-blocking
+      }
+
       const userPrompt = buildDiagnosticUserPrompt({
         failedFile: failedEndpoint.relativeFile,
         failedUrl: failedEndpoint.url,
         reason: failedEndpoint.reason || "Outbound prompts bypassed recorder port 47321.",
         projectName: project.name,
         clues: project.clues,
+        androidEnvironment,
+        securityFindings,
+        buildArtifactStatus,
       });
 
       const result = await runHarness({
@@ -917,7 +1009,9 @@ export class TrackerApp {
       }
 
       const attributed = result.finish;
-      const cleanQuote = extractCleanQuote(attributed.matchedSnippet);
+      const cleanQuotes = extractCleanQuotes(attributed.matchedSnippet);
+      const cleanQuote = cleanQuotes[0] ?? extractCleanQuote(attributed.matchedSnippet);
+      const invariantPrefix = extractInvariantPrefix(targetContent);
       const reportedSpan: ReportedSpan = {
         messageIndex,
         file: attributed.file,
@@ -937,6 +1031,8 @@ export class TrackerApp {
         fingerprint: hashPromptText(targetContent),
         quote: attributed.matchedSnippet,
         cleanQuote: cleanQuote ?? undefined,
+        cleanQuotes: cleanQuotes.length > 0 ? cleanQuotes : undefined,
+        invariantPrefix: invariantPrefix ?? undefined,
         file: attributed.file,
         startLine: attributed.startLine,
         endLine: attributed.endLine,
@@ -1169,6 +1265,16 @@ export class TrackerApp {
       return;
     }
 
+    if (this.project) {
+      const fullSourcePath = this.currentEndpoint?.relativeFile ? resolveAddressFile(this.project.path, this.currentEndpoint.relativeFile) : undefined;
+      const buildState = checkAndroidBuildState(this.project.path, fullSourcePath || undefined);
+      if (buildState.isAndroidProject && buildState.isStale) {
+        this.lastEvent = `Troubleshoot: ${buildState.summary}`;
+        this.push();
+        return;
+      }
+    }
+
     if (!this.helperKeySaved || !this.helperModel.trim()) {
       this.helperConnectOpen = true;
       this.helperStatus = "Connect an AI helper to diagnose why the app is bypassing capture.";
@@ -1201,6 +1307,8 @@ export class TrackerApp {
       this.server = null;
       await server.close().catch(() => undefined);
     }
+    await removeAndroidBridge().catch(() => undefined);
+    this.activeAndroidBridge = false;
     restoreAllRedirects(this.redirectDir);
     const key = SAVED_ENDPOINT_PREFIX + projectKey(this.project.path);
     await this.context.globalState.update(key, undefined);
@@ -1316,6 +1424,11 @@ export class TrackerApp {
       }
       const match = matchCachedAttribution(msg.content, this.projectAttributions);
       if (match) {
+        const matchedQuote = match.invariantPrefix && msg.content.includes(match.invariantPrefix)
+          ? match.invariantPrefix
+          : (match.cleanQuotes ?? []).find((q) => q && q.length >= 15 && msg.content.includes(q))
+            ?? (match.cleanQuote && msg.content.includes(match.cleanQuote) ? match.cleanQuote : match.quote);
+
         capture.reported.push({
           messageIndex: idx,
           file: match.file,
@@ -1324,7 +1437,7 @@ export class TrackerApp {
           source: "attributed",
           confidence: match.confidence,
           explanation: match.explanation,
-          quote: match.cleanQuote || match.quote,
+          quote: matchedQuote,
         });
         changed = true;
       }
@@ -1749,6 +1862,24 @@ export class TrackerApp {
     const compare = this.compare && this.project && path.resolve(this.compare.projectPath) === this.project.path
       ? presentCapture(deriveCapture(this.compare, this.index))
       : null;
+
+    let mobile: AndroidViewInfo | undefined;
+    if (this.project && isAndroidProject(this.project.path)) {
+      const fullSource = this.currentEndpoint?.relativeFile ? resolveAddressFile(this.project.path, this.currentEndpoint.relativeFile) : undefined;
+      const buildState = checkAndroidBuildState(this.project.path, fullSource || undefined);
+      const security = inspectAndroidSecurity(this.project.path);
+      mobile = {
+        isAndroid: true,
+        deviceLabel: this.activeAndroidDevice || undefined,
+        bridged: this.activeAndroidBridge,
+        cleartextPermitted: security.cleartextPermitted,
+        securityRisk: security.risk,
+        remediationSnippet: security.remediation,
+        isStale: buildState.isStale,
+        staleSummary: buildState.summary,
+      };
+    }
+
     return {
       project: this.project,
       recorder: {
@@ -1765,6 +1896,7 @@ export class TrackerApp {
         requestCount: this.watchdog.getRequestCount(),
         uptimeSeconds: this.watchdog.getUptimeSeconds(),
         missedHint: this.watchdog.getMissedHint(),
+        mobile,
       },
       helper: {
         model: this.helperModel,
@@ -1810,6 +1942,15 @@ function helperStepLabel(name: string): string {
   if (name === "detect_local_services") {
     return "The AI helper is detecting active local AI services.";
   }
+  if (name === "detect_android_environment") {
+    return "The AI helper is probing for connected Android devices or emulators.";
+  }
+  if (name === "bridge_android_device") {
+    return "The AI helper is bridging Android device port 47321 via ADB.";
+  }
+  if (name === "inspect_android_security") {
+    return "The AI helper is inspecting Android network security policy.";
+  }
   if (name === "propose_address") {
     return "The AI helper is checking a model address it found.";
   }
@@ -1843,6 +1984,16 @@ function formatToolCall(name: string, args: unknown): string {
   }
   if (name === "detect_local_services") {
     return "detect_local_services()";
+  }
+  if (name === "detect_android_environment") {
+    return "detect_android_environment()";
+  }
+  if (name === "bridge_android_device") {
+    const dev = record.deviceSerial ? `"${record.deviceSerial}", ` : "";
+    return `bridge_android_device(${dev}${record.devicePort || 47321})`;
+  }
+  if (name === "inspect_android_security") {
+    return `inspect_android_security("${record.manifestPath || ""}")`;
   }
   if (name === "propose_address") {
     return `propose_address("${record.file || ""}", "${record.url || ""}")`;

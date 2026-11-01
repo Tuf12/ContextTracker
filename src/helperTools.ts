@@ -2,10 +2,22 @@ import fs from "fs";
 import net from "net";
 import os from "os";
 import path from "path";
+import {
+  bridgeAndroidDevice,
+  detectAndroidEnvironment,
+  inspectAndroidSecurity,
+} from "./android";
 import type { HelperTool } from "./harness";
 import { isHomeConfigPath, isInside, resolveAddressFile, toRelative } from "./paths";
 import { isSecretFile, redactText } from "./redact";
-import type { AddressOffer, AttributedSpan } from "./types";
+import type {
+  AddressOffer,
+  AndroidBridgeResult,
+  AndroidDevice,
+  AndroidEnvironment,
+  AndroidSecurityResult,
+  AttributedSpan,
+} from "./types";
 
 const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "out", "__pycache__", ".venv", "venv"]);
 const MAX_FILE = 200_000;
@@ -33,8 +45,20 @@ export const ADDRESS_SYSTEM = [
   "- Call detect_local_services when checking local model endpoints (Ollama on 11434, LM Studio on 1234, vLLM/LocalAI on 8000, Text Generation WebUI on 5000) to ground whether a service is actively listening on this machine.",
   "- Call find_user_config_dirs with app hints when the app refers to user configuration directories or when checking for external runtime configurations.",
   "",
+  "### MOBILE & ANDROID ARCHITECTURE RECOGNITION",
+  "When inspecting projects with Android / Kotlin codebases (e.g. build.gradle, build.gradle.kts, AndroidManifest.xml, app/src/...):",
+  "1. Tool Invocation: Call detect_android_environment and inspect_android_security in your initial turn alongside search_text.",
+  "2. Endpoint Resolution:",
+  "   - Identify Retrofit base URLs, Ktor client configurations, OkHttp baseUrl, BuildConfig fields, or strings.xml.",
+  "   - If an active Android device or emulator is detected:",
+  "     a) Call bridge_android_device to map port 47321.",
+  "     b) Propose the original base URL configured in the file (e.g. https://api.openai.com/v1). Do not propose port 47321 directly, as Context Tracker redirects the proposed address to port 47321 upon capture.",
+  "   - If an emulator is running without ADB bridge access, note http://10.0.2.2:47321 as the emulator loopback gateway.",
+  "3. Build State Warning:",
+  "   - Always note in your reasoning if the configuration resides in compiled code (Kotlin source, BuildConfig, or Gradle build scripts), advising the user to trigger 'Run' in Android Studio after capture arms.",
+  "",
   "### PARALLEL TOOL CALLING EFFICIENCY",
-  "- Muse Spark 1.3 and Muse Wonder support parallel tool calling. In your initial turn, batch your reconnaissance into parallel tool calls! For example, simultaneously query detect_local_services, find_user_config_dirs, and search_text or read_file in a single turn.",
+  "- Muse Spark 1.3 and Muse Wonder support parallel tool calling. In your initial turn, batch your reconnaissance into parallel tool calls! For example, simultaneously query detect_local_services, find_user_config_dirs, detect_android_environment, and search_text or read_file in a single turn.",
   "- This enables single-turn or 2-turn resolution without unnecessary roundtrips.",
   "",
   "### RULES & CONSTRAINTS",
@@ -134,6 +158,52 @@ export function addressTools(
       run: async () => ({ content: await detectLocalServices() }),
     },
     {
+      name: "detect_android_environment",
+      description: "Detect Android SDK, ADB availability, and connected Android devices or emulators on the host machine.",
+      parameters: {
+        type: "object",
+        properties: {},
+      },
+      run: async () => {
+        const env = await detectAndroidEnvironment();
+        return { content: JSON.stringify(env, null, 2) };
+      },
+    },
+    {
+      name: "bridge_android_device",
+      description: "Bridge an Android device or emulator loopback to the host Context Tracker recorder (runs adb reverse tcp:47321 tcp:47321). Call this when an active Android device or emulator is detected.",
+      parameters: {
+        type: "object",
+        properties: {
+          deviceSerial: { type: "string", description: "Optional specific device serial (e.g. emulator-5554 or physical device serial)." },
+          devicePort: { type: "number", description: "Device port to bind (default: 47321)." },
+          hostPort: { type: "number", description: "Host recorder port (default: 47321)." },
+        },
+      },
+      run: async (args) => {
+        const deviceSerial = typeof args === "object" && args && "deviceSerial" in args && typeof (args as any).deviceSerial === "string" ? (args as any).deviceSerial : undefined;
+        const devicePort = typeof args === "object" && args && "devicePort" in args && typeof (args as any).devicePort === "number" ? (args as any).devicePort : undefined;
+        const hostPort = typeof args === "object" && args && "hostPort" in args && typeof (args as any).hostPort === "number" ? (args as any).hostPort : undefined;
+        const result = await bridgeAndroidDevice({ deviceSerial, devicePort, hostPort });
+        return { content: JSON.stringify(result, null, 2) };
+      },
+    },
+    {
+      name: "inspect_android_security",
+      description: "Inspect AndroidManifest.xml and network_security_config.xml in the project to verify whether cleartext HTTP (http://) traffic to localhost or 10.0.2.2 is permitted.",
+      parameters: {
+        type: "object",
+        properties: {
+          manifestPath: { type: "string", description: "Optional relative path to AndroidManifest.xml." },
+        },
+      },
+      run: (args) => {
+        const manifestPath = typeof args === "object" && args && "manifestPath" in args && typeof (args as any).manifestPath === "string" ? (args as any).manifestPath : undefined;
+        const result = inspectAndroidSecurity(root, { manifestPath });
+        return { content: JSON.stringify(result, null, 2) };
+      },
+    },
+    {
       name: "propose_address",
       description: "Finish with the file and the exact HTTP URL currently written in that file.",
       parameters: {
@@ -148,6 +218,13 @@ export function addressTools(
       run: (args) => proposeAddress(root, args, options),
     },
   ];
+}
+
+export function diagnosticTools(
+  root: string,
+  options?: { failedFile?: string; failedUrl?: string },
+): Array<HelperTool<AddressOffer>> {
+  return addressTools(root, options);
 }
 
 export function proposeAddress(
@@ -588,6 +665,9 @@ export function buildDiagnosticUserPrompt(options: {
   reason?: string;
   projectName?: string;
   clues?: { file: string; line: number; text: string }[];
+  androidEnvironment?: AndroidEnvironment | string;
+  securityFindings?: AndroidSecurityResult | string;
+  buildArtifactStatus?: string;
 }): string {
   const parts: string[] = [];
   const diagnosticHeader = [
@@ -601,6 +681,24 @@ export function buildDiagnosticUserPrompt(options: {
 
   if (options.projectName) {
     parts.push(`Project name: ${options.projectName}`);
+  }
+
+  if (options.androidEnvironment) {
+    const envText = typeof options.androidEnvironment === "string"
+      ? options.androidEnvironment
+      : options.androidEnvironment.summary;
+    parts.push(`Mobile & Android Device Status:\n${envText}`);
+  }
+
+  if (options.securityFindings) {
+    const secText = typeof options.securityFindings === "string"
+      ? options.securityFindings
+      : options.securityFindings.risk || (options.securityFindings.cleartextPermitted ? "Cleartext HTTP traffic is permitted." : "Cleartext HTTP is blocked.");
+    parts.push(`Android Network Security:\n${secText}`);
+  }
+
+  if (options.buildArtifactStatus) {
+    parts.push(`Build Artifact State:\n${options.buildArtifactStatus}`);
   }
 
   if (options.clues && options.clues.length > 0) {

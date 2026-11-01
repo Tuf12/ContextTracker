@@ -134,7 +134,9 @@ export class CaptureStore {
             continue;
           }
           const fingerprint = hashPromptText(msg.content);
-          const cleanQuote = extractCleanQuote(span.quote);
+          const cleanQuotes = extractCleanQuotes(span.quote);
+          const cleanQuote = cleanQuotes[0] ?? extractCleanQuote(span.quote);
+          const invariantPrefix = extractInvariantPrefix(msg.content);
           if (knownFingerprints.has(fingerprint) || (cleanQuote && knownQuotes.has(cleanQuote))) {
             continue;
           }
@@ -146,6 +148,8 @@ export class CaptureStore {
             fingerprint,
             quote: span.quote,
             cleanQuote: cleanQuote ?? undefined,
+            cleanQuotes: cleanQuotes.length > 0 ? cleanQuotes : undefined,
+            invariantPrefix: invariantPrefix ?? undefined,
             file: span.file,
             startLine: span.startLine,
             endLine: span.endLine,
@@ -159,13 +163,86 @@ export class CaptureStore {
       }
     }
 
-    if (discovered.length > 0) {
-      const merged = [...discovered, ...existing].slice(0, 100);
+    const allAttributions = [...discovered, ...existing];
+    const uniqueMap = new Map<string, CachedAttribution>();
+    for (const item of allAttributions) {
+      const idKey = item.fingerprint || `${item.file}:${item.startLine}:${item.endLine}`;
+      const prior = uniqueMap.get(idKey);
+      if (!prior) {
+        uniqueMap.set(idKey, item);
+      } else {
+        uniqueMap.set(idKey, {
+          ...prior,
+          cleanQuotes: prior.cleanQuotes ?? item.cleanQuotes,
+          invariantPrefix: prior.invariantPrefix ?? item.invariantPrefix,
+          cleanQuote: prior.cleanQuote ?? item.cleanQuote,
+        });
+      }
+    }
+    const merged = Array.from(uniqueMap.values()).slice(0, 100);
+
+    // Back-propagate to any existing captures that match but are missing attributions
+    let indexUpdated = false;
+    for (const entry of entries) {
+      if (!entry.endsWith(".json") || entry === "attributions.json") {
+        continue;
+      }
+      try {
+        const filePath = path.join(projectDir, entry);
+        const raw = JSON.parse(await fs.readFile(filePath, "utf8")) as StoredCapture;
+        if (!Array.isArray(raw.reported) || !Array.isArray(raw.messages)) {
+          continue;
+        }
+        let captureChanged = false;
+        raw.messages.forEach((msg, idx) => {
+          if (msg.role === "assistant") return;
+          const hasAttr = raw.reported.some((s) => s.messageIndex === idx && s.source === "attributed");
+          if (!hasAttr) {
+            const match = matchCachedAttribution(msg.content, merged);
+            if (match) {
+              const matchedQuote = match.invariantPrefix && msg.content.includes(match.invariantPrefix)
+                ? match.invariantPrefix
+                : (match.cleanQuotes ?? []).find((q) => q && q.length >= 15 && msg.content.includes(q))
+                  ?? (match.cleanQuote && msg.content.includes(match.cleanQuote) ? match.cleanQuote : match.quote);
+              raw.reported.push({
+                messageIndex: idx,
+                file: match.file,
+                startLine: match.startLine,
+                endLine: match.endLine,
+                source: "attributed",
+                confidence: match.confidence,
+                explanation: match.explanation,
+                quote: matchedQuote,
+              });
+              captureChanged = true;
+            }
+          }
+        });
+        if (captureChanged) {
+          await writeJson(filePath, raw);
+          this.remember(raw);
+          indexUpdated = true;
+        }
+      } catch {
+        // ignore individual capture read error
+      }
+    }
+
+    if (discovered.length > 0 || indexUpdated) {
       await fs.mkdir(projectDir, { recursive: true });
       await writeJson(this.attributionPath(projectPath), merged);
-      return merged;
+      if (indexUpdated) {
+        const index = await this.readIndex();
+        const prevItems = index.projects[key]?.items ?? [];
+        const updatedItems = prevItems.map((item) => {
+          const cached = this.memory.get(item.id);
+          return cached ? toSummary(cached) : item;
+        });
+        index.projects[key] = { path: path.resolve(projectPath), items: updatedItems };
+        await this.writeIndex(index);
+      }
     }
-    return existing;
+    return merged;
   }
 
   private attributionPath(projectPath: string): string {
@@ -248,15 +325,71 @@ export function hashPromptText(text: string): string {
   return crypto.createHash("sha256").update(text.trim()).digest("hex").slice(0, 16);
 }
 
-export function extractCleanQuote(rawQuote?: string): string | null {
+export function extractCleanQuotes(rawQuote?: string): string[] {
   if (!rawQuote || typeof rawQuote !== "string") {
+    return [];
+  }
+  const results: string[] = [];
+
+  // 1. String literals in code: triple quotes, double quotes, single quotes, backticks
+  const literalRegex = /(?:"""([\s\S]*?)"""|'''([\s\S]*?)'''|`([\s\S]*?)`|"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)')/g;
+  let match: RegExpExecArray | null;
+  while ((match = literalRegex.exec(rawQuote)) !== null) {
+    const rawVal = match[1] ?? match[2] ?? match[3] ?? match[4] ?? match[5] ?? "";
+    const val = rawVal
+      .replace(/\\n/g, "\n")
+      .replace(/\\t/g, " ")
+      .replace(/\\"/g, "\"")
+      .replace(/\\'/g, "'")
+      .trim();
+    if (val.length >= 15) {
+      results.push(val);
+      const subLines = val.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length >= 15);
+      results.push(...subLines);
+    }
+  }
+
+  // 2. Lines from raw text (stripping leading code keywords/method calls, assignments, quotes, punctuation)
+  const lines = rawQuote.split(/\r?\n/).map((l) => {
+    return l
+      .replace(/^(?:append|print|println|logger\.\w+|console\.\w+)\s*\(\s*/, "")
+      .replace(/^(?:const|let|var|val)\s+\w+\s*=\s*/, "")
+      .replace(/^[+\s'"`,]+|[+\s'"`,);]+$/g, "")
+      .trim();
+  }).filter((l) => l.length >= 15);
+  results.push(...lines);
+
+  // 3. Fallback raw text trimmed
+  const rawTrimmed = rawQuote.trim();
+  if (rawTrimmed.length >= 15) {
+    results.push(rawTrimmed);
+  }
+
+  // 4. Strip template placeholders like {{ ... }}, { ... }, <%= ... %>
+  for (const item of [...results]) {
+    const stripped = item.replace(/\{\{[\s\S]*?\}\}|\{[\s\S]*?\}|<%[\s\S]*?%>/g, " ").replace(/\s+/g, " ").trim();
+    if (stripped.length >= 15 && stripped !== item) {
+      results.push(stripped);
+    }
+  }
+
+  return Array.from(new Set(results)).filter((q) => q.length >= 15);
+}
+
+export function extractCleanQuote(rawQuote?: string): string | null {
+  const quotes = extractCleanQuotes(rawQuote);
+  return quotes[0] ?? null;
+}
+
+export function extractInvariantPrefix(content?: string): string | null {
+  if (!content || typeof content !== "string") {
     return null;
   }
-  const lines = rawQuote
-    .split(/\r?\n/)
-    .map((l) => l.replace(/^[\s'"`,]+|[\s'"`,]+$/g, "").trim())
-    .filter((l) => l.length >= 20);
-  return lines[0] ?? (rawQuote.trim().length >= 10 ? rawQuote.trim() : null);
+  const paragraphs = content
+    .split(/\r?\n\s*\r?\n/)
+    .map((p) => p.trim())
+    .filter((p) => p.length >= 25);
+  return paragraphs[0] ?? (content.trim().length >= 25 ? content.trim().slice(0, 300) : null);
 }
 
 export function matchCachedAttribution(
@@ -267,17 +400,57 @@ export function matchCachedAttribution(
     return null;
   }
   const fingerprint = hashPromptText(content);
+  // 1. Exact full-content match
   for (const attr of attributions) {
     if (attr.fingerprint === fingerprint) {
       return attr;
     }
   }
+
+  // 2. Invariant prefix match (e.g. persona header, system instructions)
   for (const attr of attributions) {
-    const q = attr.cleanQuote || attr.quote;
-    if (q && q.length >= 20 && content.includes(q)) {
+    if (attr.invariantPrefix && attr.invariantPrefix.length >= 25 && content.includes(attr.invariantPrefix)) {
       return attr;
     }
   }
+
+  // 3. Current content prefix match with stored invariantPrefix
+  const currentPrefix = extractInvariantPrefix(content);
+  if (currentPrefix && currentPrefix.length >= 25) {
+    for (const attr of attributions) {
+      if (attr.invariantPrefix && (attr.invariantPrefix === currentPrefix || attr.invariantPrefix.includes(currentPrefix) || currentPrefix.includes(attr.invariantPrefix))) {
+        return attr;
+      }
+    }
+  }
+
+  // 4. Stored cleanQuotes array match
+  for (const attr of attributions) {
+    if (Array.isArray(attr.cleanQuotes)) {
+      for (const q of attr.cleanQuotes) {
+        if (q && q.length >= 15 && content.includes(q)) {
+          return attr;
+        }
+      }
+    }
+  }
+
+  // 5. Clean quotes dynamically extracted from quote or cleanQuote
+  for (const attr of attributions) {
+    const raw = attr.quote || attr.cleanQuote;
+    if (raw) {
+      const candidates = extractCleanQuotes(raw);
+      for (const q of candidates) {
+        if (q && q.length >= 15 && content.includes(q)) {
+          return attr;
+        }
+      }
+      if (raw.length >= 15 && content.includes(raw)) {
+        return attr;
+      }
+    }
+  }
+
   return null;
 }
 

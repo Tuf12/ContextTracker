@@ -5,7 +5,7 @@ const path = require("node:path");
 const test = require("node:test");
 const { runHarness } = require("../out/harness.js");
 const { completeChat, helperChatUrl, listHelperModels, modelIdsFromResponse } = require("../out/helperClient.js");
-const { ADDRESS_SYSTEM, addressTools, ATTRIBUTION_SYSTEM, attributionTools, attributePrompt, buildAttributionUserPrompt, buildDiagnosticUserPrompt, buildHelperUserPrompt, detectLocalServices, detectSourceConfigFile, findUserConfigDirs, inferAppHints, KNOWN_LOCAL_SERVICES, probePort, proposeAddress, searchText } = require("../out/helperTools.js");
+const { ADDRESS_SYSTEM, addressTools, ATTRIBUTION_SYSTEM, attributionTools, attributePrompt, buildAttributionUserPrompt, buildDiagnosticUserPrompt, buildHelperUserPrompt, detectLocalServices, detectSourceConfigFile, diagnosticTools, findUserConfigDirs, inferAppHints, KNOWN_LOCAL_SERVICES, probePort, proposeAddress, searchText } = require("../out/helperTools.js");
 const { expandHomeDir, isHomeConfigPath } = require("../out/paths.js");
 const { redactText } = require("../out/redact.js");
 const net = require("node:net");
@@ -952,4 +952,148 @@ test("runHarness onEvent streams thoughts, tool_call, tool_result, and finish", 
   assert.equal(events.some((e) => e.kind === "tool_call" && e.toolName === "test_tool"), true);
   assert.equal(events.some((e) => e.kind === "tool_result" && e.content.includes("found 1 match")), true);
   assert.equal(events.some((e) => e.kind === "finish" && e.finish.done === true), true);
+});
+
+test("addressTools and diagnosticTools include Android mobile sensory and actuation tools", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "context-tracker-android-tools-"));
+  try {
+    const tools = addressTools(root);
+    const diagTools = diagnosticTools(root);
+
+    assert.equal(typeof diagTools, "object");
+    assert.equal(diagTools.length, tools.length);
+
+    const androidEnv = tools.find((t) => t.name === "detect_android_environment");
+    const androidBridge = tools.find((t) => t.name === "bridge_android_device");
+    const androidSec = tools.find((t) => t.name === "inspect_android_security");
+
+    assert.ok(androidEnv, "detect_android_environment must be registered in addressTools");
+    assert.ok(androidBridge, "bridge_android_device must be registered in addressTools");
+    assert.ok(androidSec, "inspect_android_security must be registered in addressTools");
+
+    assert.ok(diagTools.find((t) => t.name === "detect_android_environment"));
+    assert.ok(diagTools.find((t) => t.name === "bridge_android_device"));
+    assert.ok(diagTools.find((t) => t.name === "inspect_android_security"));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("ADDRESS_SYSTEM includes mobile and Android architecture recognition rules", () => {
+  assert.match(ADDRESS_SYSTEM, /MOBILE & ANDROID ARCHITECTURE RECOGNITION/);
+  assert.match(ADDRESS_SYSTEM, /detect_android_environment/);
+  assert.match(ADDRESS_SYSTEM, /bridge_android_device/);
+  assert.match(ADDRESS_SYSTEM, /inspect_android_security/);
+  assert.match(ADDRESS_SYSTEM, /10\.0\.2\.2:47321/);
+});
+
+test("buildDiagnosticUserPrompt formats androidEnvironment, securityFindings, and buildArtifactStatus", () => {
+  const prompt = buildDiagnosticUserPrompt({
+    failedFile: "app/src/main/java/NetworkModule.kt",
+    failedUrl: "http://127.0.0.1:47321",
+    reason: "No requests on port 47321 after 15s.",
+    projectName: "ChatAndroid",
+    androidEnvironment: {
+      available: true,
+      adbPath: "/path/to/adb",
+      devices: [{ serial: "emulator-5554", type: "emulator", state: "device" }],
+      defaultStrategy: "adb_reverse",
+      summary: "ADB active with emulator-5554 ready.",
+    },
+    securityFindings: {
+      cleartextPermitted: false,
+      manifestFound: true,
+      risk: "Cleartext HTTP is blocked by default.",
+    },
+    buildArtifactStatus: "app-debug.apk is older than source modification.",
+  });
+
+  assert.match(prompt, /ChatAndroid/);
+  assert.match(prompt, /NetworkModule\.kt/);
+  assert.match(prompt, /Mobile & Android Device Status/);
+  assert.match(prompt, /ADB active with emulator-5554 ready/);
+  assert.match(prompt, /Android Network Security/);
+  assert.match(prompt, /Cleartext HTTP is blocked by default/);
+  assert.match(prompt, /Build Artifact State/);
+  assert.match(prompt, /app-debug\.apk is older than source modification/);
+});
+
+test("Meta Muse helper discovers Android Kotlin architecture and bridges device in 2 turns", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "context-tracker-android-fixture-"));
+  try {
+    const pkgDir = path.join(root, "app", "src", "main", "java", "com", "example");
+    fs.mkdirSync(pkgDir, { recursive: true });
+    const netFile = path.join(pkgDir, "NetworkModule.kt");
+    fs.writeFileSync(
+      netFile,
+      [
+        "package com.example",
+        "object NetworkModule {",
+        '    const val BASE_URL = "https://api.openai.com/v1"',
+        "}",
+      ].join("\n"),
+    );
+
+    const manifestDir = path.join(root, "app", "src", "main");
+    fs.writeFileSync(
+      path.join(manifestDir, "AndroidManifest.xml"),
+      '<manifest><application android:usesCleartextTraffic="true"></application></manifest>',
+    );
+
+    const tools = addressTools(root);
+    const events = [];
+
+    // Simulate 2-turn execution by Meta Muse model:
+    // Turn 1: Parallel reconnaissance (detect_android_environment, inspect_android_security, search_text)
+    // Turn 2: bridge_android_device + propose_address
+    const res = await runHarness({
+      system: ADDRESS_SYSTEM,
+      user: buildHelperUserPrompt(
+        [{ file: "app/src/main/java/com/example/NetworkModule.kt", line: 3, text: 'const val BASE_URL = "https://api.openai.com/v1"' }],
+        { name: "KotlinLLM" },
+      ),
+      stepCap: 4,
+      tools,
+      onEvent: (ev) => events.push(ev),
+      complete: async (messages) => {
+        if (messages.length <= 2) {
+          return {
+            content: "Analyzing Android Kotlin project architecture and probing mobile environment.",
+            toolCalls: [
+              { id: "call-1", name: "detect_android_environment", arguments: "{}" },
+              { id: "call-2", name: "inspect_android_security", arguments: "{}" },
+              { id: "call-3", name: "search_text", arguments: JSON.stringify({ query: "BASE_URL" }) },
+            ],
+          };
+        }
+        return {
+          content: "Active Android device verified and cleartext allowed. Bridging port 47321 and proposing base URL.",
+          toolCalls: [
+            {
+              id: "call-4",
+              name: "propose_address",
+              arguments: JSON.stringify({
+                file: "app/src/main/java/com/example/NetworkModule.kt",
+                url: "https://api.openai.com/v1",
+                reason: "Retrofit/OkHttp BASE_URL in Kotlin NetworkModule",
+              }),
+            },
+          ],
+        };
+      },
+    });
+
+    assert.ok(res.finish, "Should resolve address successfully");
+    assert.equal(res.finish.relativeFile, "app/src/main/java/com/example/NetworkModule.kt");
+    assert.equal(res.finish.url, "https://api.openai.com/v1");
+    assert.equal(res.finish.line, 3);
+    assert.equal(res.steps, 2, "Must resolve in 2 turns");
+
+    assert.ok(events.some((e) => e.kind === "tool_call" && e.toolName === "detect_android_environment"));
+    assert.ok(events.some((e) => e.kind === "tool_call" && e.toolName === "inspect_android_security"));
+    assert.ok(events.some((e) => e.kind === "tool_call" && e.toolName === "search_text"));
+    assert.ok(events.some((e) => e.kind === "finish" && e.finish.url === "https://api.openai.com/v1"));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

@@ -98,3 +98,37 @@ test("TrafficWatchdog troubleshoot connection immediately marks idle and generat
 
   watchdog.stop();
 });
+
+test("TrafficWatchdog provides Android-aware silence hint when projectContext isAndroid", () => {
+  const watchdog = new TrafficWatchdog({
+    upstream: "https://api.openai.com",
+    idleTimeoutSeconds: 5,
+  });
+  watchdog.setProjectContext({ isAndroid: true, isStale: false });
+
+  const t0 = 5000000;
+  watchdog.start(t0);
+  assert.equal(watchdog.checkIdle(t0 + 6000), true);
+  assert.equal(watchdog.getState(), "listening_idle");
+  assert.match(watchdog.getMissedHint(), /Android/);
+  assert.match(watchdog.getMissedHint(), /bridged via ADB/);
+
+  watchdog.stop();
+});
+
+test("TrafficWatchdog warns about stale APK when projectContext isStale", () => {
+  const watchdog = new TrafficWatchdog({
+    upstream: "https://api.openai.com",
+    idleTimeoutSeconds: 5,
+  });
+  watchdog.setProjectContext({ isAndroid: true, isStale: true });
+
+  const t0 = 6000000;
+  watchdog.start(t0);
+  assert.equal(watchdog.checkIdle(t0 + 6000), true);
+  assert.equal(watchdog.getState(), "listening_idle");
+  assert.match(watchdog.getMissedHint(), /APK may be older than the redirected source file/);
+  assert.match(watchdog.getMissedHint(), /Android Studio/);
+
+  watchdog.stop();
+});

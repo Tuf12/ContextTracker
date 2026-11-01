@@ -34,6 +34,7 @@ let detailScrollTop = 0;
   ].join("\n");
 
   let attributingMessage = null;
+  let copiedSecuritySnippet = false;
 
   window.addEventListener("message", (event) => {
     if (!event.data || event.data.type !== "state") {
@@ -183,7 +184,11 @@ let detailScrollTop = 0;
           title: isCollapsed ? "Expand Project card" : "Collapse Project card",
         },
           h("span", { class: "collapse-arrow" }, isCollapsed ? "▸" : "▾"),
-          h("h2", { style: "margin:0;" }, project.name)),
+          h("h2", { style: "margin:0;display:inline-flex;align-items:center;gap:6px;" },
+            project.name,
+            state.recorder && state.recorder.mobile && state.recorder.mobile.isAndroid
+              ? h("span", { class: "badge badge-mobile-idle", style: "font-size:10px;font-weight:normal;" }, "Android")
+              : null)),
         h("div", { class: "row", style: "gap:4px;" },
           project.indexing ? null : h("button", { class: "ghost icon-btn", onClick: send("reindex"), title: "Index files again" }, "Reindex"),
           h("button", { class: "ghost icon-btn", onClick: send("openProject") }, "Change"))),
@@ -220,9 +225,45 @@ let detailScrollTop = 0;
         },
           h("span", { class: "collapse-arrow" }, isCollapsed ? "▸" : "▾"),
           h("h2", { style: "margin:0;" }, "Capture")),
-        h("span", { class: recorder.running ? "badge badge-ready" : "badge badge-idle" },
-          recorder.running ? "● Active (47321)" : "○ Off")),
+        h("div", { class: "row", style: "gap:6px;align-items:center;" },
+          recorder.mobile && recorder.mobile.isAndroid
+            ? h("span", {
+                class: recorder.mobile.bridged ? "badge badge-mobile badge-mobile-active" : "badge badge-mobile",
+                title: recorder.mobile.deviceLabel
+                  ? `Device: ${recorder.mobile.deviceLabel} (${recorder.mobile.bridged ? "Bridged via ADB" : "Detected"})`
+                  : "Android Project",
+              }, recorder.mobile.deviceLabel
+                ? `📱 ${recorder.mobile.deviceLabel.split(",")[0].trim()} (${recorder.mobile.bridged ? "Bridged" : "Active"})`
+                : "📱 Android")
+            : null,
+          h("span", { class: recorder.running ? "badge badge-ready" : "badge badge-idle" },
+            recorder.running ? "● Active (47321)" : "○ Off"))),
       isCollapsed ? null : trafficSummary ? h("p", { class: "quiet", style: "font-weight:600;font-size:11px;margin:2px 0;" }, trafficSummary) : null,
+      isCollapsed ? null : (recorder.running && recorder.mobile && recorder.mobile.isStale)
+        ? h("div", { class: "banner warning mobile-stale-card", style: "margin:6px 0;display:flex;align-items:center;gap:6px;" },
+            h("span", { style: "font-size:13px;" }, "⚡"),
+            h("div", null,
+              h("strong", { style: "font-size:11px;display:block;" }, "Re-run app in Android Studio"),
+              h("span", { class: "quiet", style: "font-size:10px;" }, "APK is older than the redirected endpoint. Trigger 'Run' in Android Studio to apply capture.")))
+        : null,
+      isCollapsed ? null : (recorder.mobile && recorder.mobile.isAndroid && !recorder.mobile.cleartextPermitted)
+        ? h("div", { class: "banner warning mobile-security-card", style: "margin:6px 0;display:flex;flex-direction:column;gap:6px;" },
+            h("div", { class: "spread", style: "align-items:flex-start;" },
+              h("span", { style: "font-weight:600;font-size:11px;" }, "⚠️ Cleartext HTTP Blocked"),
+              h("button", {
+                class: "secondary icon-btn",
+                style: "font-size:10px;padding:2px 6px;",
+                onClick: () => {
+                  copyToClipboard(recorder.mobile.remediationSnippet || "");
+                  copiedSecuritySnippet = true;
+                  render();
+                  setTimeout(() => { copiedSecuritySnippet = false; render(); }, 2500);
+                },
+                title: "Copy network_security_config.xml XML configuration to clipboard",
+              }, copiedSecuritySnippet ? "✓ Copied XML" : "Copy network_security_config.xml")),
+            h("p", { class: "quiet", style: "font-size:10px;margin:0;line-height:1.4;" },
+              "Android 9+ blocks unencrypted http:// by default. Requests to port 47321 will fail unless permitted in network_security_config.xml."))
+        : null,
       isCollapsed ? null : recorder.missedHint
         ? h("p", { class: "banner warning", style: "margin:6px 0;" }, recorder.missedHint)
         : null,
@@ -877,6 +918,13 @@ let detailScrollTop = 0;
 
   function send(type) {
     return () => post({ type: type });
+  }
+
+  function copyToClipboard(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).catch(() => undefined);
+    }
+    post({ type: "copyText", text: text });
   }
 
   function post(message) {
