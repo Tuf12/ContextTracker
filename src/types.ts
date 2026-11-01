@@ -26,6 +26,18 @@ export type ReportedSpan = {
   explanation?: string;
 };
 
+export type CachedAttribution = {
+  fingerprint: string;
+  quote?: string;
+  cleanQuote?: string;
+  file: string;
+  startLine: number;
+  endLine: number;
+  confidence: number;
+  explanation: string;
+  attributedAt: string;
+};
+
 export type StoredCapture = {
   id: string;
   clientRequestId: string | null;
@@ -40,6 +52,7 @@ export type StoredCapture = {
   messages: PromptMessage[];
   reply: string;
   reported: ReportedSpan[];
+  telemetry?: CaptureTelemetry;
 };
 
 export type CaptureSummary = {
@@ -51,6 +64,7 @@ export type CaptureSummary = {
   status: number | null;
   error: string | null;
   preview: string;
+  fileSpanCount?: number;
 };
 
 export type FilePointer = {
@@ -98,6 +112,7 @@ export type CaptureView = {
   messages: ViewMessage[];
   reply: string;
   fileSpanCount: number;
+  telemetry?: CaptureTelemetry;
 };
 
 export type EnvKeyPlan = {
@@ -120,6 +135,7 @@ export type ViewMessage = {
   roleLabel: string;
   truncated: boolean;
   spans: ViewSpan[];
+  telemetry?: SectionTelemetry;
 };
 
 export type ProjectView = {
@@ -204,3 +220,57 @@ export type ViewState = {
   compareId: string | null;
   compare: CaptureView | null;
 };
+
+export type ContextSectionCategory =
+  | "system_instruction"
+  | "rag_grounding"
+  | "chat_history"
+  | "few_shot_exemplar"
+  | "schema_tool_spec"
+  | "user_query"
+  | "runtime_data";
+
+export type SectionTelemetry = {
+  sectionId: string;
+  messageIndex: number;
+  messageIndices?: number[];
+  category: ContextSectionCategory;
+  categoryLabel: string;
+  what: string;
+  why: string;
+  tokenEstimate: number;
+  tokenPercentage: number;
+  warning?: string;
+};
+
+export type CategoryComposition = {
+  category: ContextSectionCategory;
+  categoryLabel: string;
+  tokens: number;
+  percentage: number;
+  colorVar: string;
+};
+
+export type CaptureTelemetry = {
+  captureId: string;
+  analyzedAt: string;
+  totalTokens: number;
+  composition: CategoryComposition[];
+  sections: SectionTelemetry[];
+  warnings: string[];
+};
+
+export type ContextSection = {
+  sectionId: string;
+  messageIndex: number;
+  messageIndices: number[];
+  role: string;
+  content: string;
+  tokenEstimate: number;
+  fingerprint: string;
+  heuristicCategory: ContextSectionCategory;
+  isCollapsedHistory?: boolean;
+  turns?: number;
+  preview: string;
+};
+

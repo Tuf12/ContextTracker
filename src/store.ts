@@ -1,7 +1,8 @@
+import crypto from "crypto";
 import fs from "fs/promises";
 import path from "path";
 import { projectKey } from "./paths";
-import type { CaptureSummary, StoredCapture } from "./types";
+import type { CachedAttribution, CaptureSummary, StoredCapture } from "./types";
 
 type IndexFile = {
   projects: Record<string, { path: string; items: CaptureSummary[] }>;
@@ -65,9 +66,110 @@ export class CaptureStore {
     return items;
   }
 
-  async update(capture: StoredCapture): Promise<void> {
+  async update(capture: StoredCapture): Promise<CaptureSummary[]> {
     await writeJson(this.capturePath(capture.projectPath, capture.id), capture);
     this.remember(capture);
+    const index = await this.readIndex();
+    const key = projectKey(capture.projectPath);
+    const previous = index.projects[key]?.items ?? [];
+    const summary = toSummary(capture);
+    const items = previous.map((item) => (item.id === capture.id ? summary : item));
+    index.projects[key] = { path: path.resolve(capture.projectPath), items };
+    await this.writeIndex(index);
+    return items;
+  }
+
+  async listAttributions(projectPath: string): Promise<CachedAttribution[]> {
+    const file = this.attributionPath(projectPath);
+    try {
+      const data = JSON.parse(await fs.readFile(file, "utf8")) as CachedAttribution[];
+      return Array.isArray(data) ? data : [];
+    } catch {
+      return [];
+    }
+  }
+
+  async saveAttribution(projectPath: string, attribution: CachedAttribution): Promise<void> {
+    const file = this.attributionPath(projectPath);
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const existing = await this.listAttributions(projectPath);
+    const filtered = existing.filter(
+      (item) => item.fingerprint !== attribution.fingerprint && (!attribution.cleanQuote || item.cleanQuote !== attribution.cleanQuote),
+    );
+    const updated = [attribution, ...filtered].slice(0, 100);
+    await writeJson(file, updated);
+  }
+
+  async seedAttributionsFromCaptures(projectPath: string): Promise<CachedAttribution[]> {
+    const existing = await this.listAttributions(projectPath);
+    const knownFingerprints = new Set(existing.map((a) => a.fingerprint));
+    const knownQuotes = new Set(existing.map((a) => a.cleanQuote).filter(Boolean));
+
+    const key = projectKey(projectPath);
+    const projectDir = path.join(this.root, key);
+    let entries: string[] = [];
+    try {
+      entries = await fs.readdir(projectDir);
+    } catch {
+      return existing;
+    }
+
+    const discovered: CachedAttribution[] = [];
+    for (const entry of entries) {
+      if (!entry.endsWith(".json") || entry === "attributions.json") {
+        continue;
+      }
+      try {
+        const raw = JSON.parse(await fs.readFile(path.join(projectDir, entry), "utf8")) as StoredCapture;
+        if (!Array.isArray(raw.reported) || !Array.isArray(raw.messages)) {
+          continue;
+        }
+        for (const span of raw.reported) {
+          if (span.source !== "attributed") {
+            continue;
+          }
+          const messageIndex = span.messageIndex ?? 0;
+          const msg = raw.messages[messageIndex];
+          if (!msg || !msg.content) {
+            continue;
+          }
+          const fingerprint = hashPromptText(msg.content);
+          const cleanQuote = extractCleanQuote(span.quote);
+          if (knownFingerprints.has(fingerprint) || (cleanQuote && knownQuotes.has(cleanQuote))) {
+            continue;
+          }
+          knownFingerprints.add(fingerprint);
+          if (cleanQuote) {
+            knownQuotes.add(cleanQuote);
+          }
+          discovered.push({
+            fingerprint,
+            quote: span.quote,
+            cleanQuote: cleanQuote ?? undefined,
+            file: span.file,
+            startLine: span.startLine,
+            endLine: span.endLine,
+            confidence: span.confidence ?? 0.85,
+            explanation: span.explanation ?? "Attributed from previous capture",
+            attributedAt: raw.createdAt,
+          });
+        }
+      } catch {
+        // ignore parse error
+      }
+    }
+
+    if (discovered.length > 0) {
+      const merged = [...discovered, ...existing].slice(0, 100);
+      await fs.mkdir(projectDir, { recursive: true });
+      await writeJson(this.attributionPath(projectPath), merged);
+      return merged;
+    }
+    return existing;
+  }
+
+  private attributionPath(projectPath: string): string {
+    return path.join(this.root, projectKey(projectPath), "attributions.json");
   }
 
   async remove(projectPath: string, id: string): Promise<CaptureSummary[]> {
@@ -126,6 +228,9 @@ export class CaptureStore {
 export function toSummary(capture: StoredCapture): CaptureSummary {
   const previewSource = capture.messages.find((message) => message.content.trim())?.content ?? "";
   const preview = previewSource.replace(/\s+/g, " ").trim().slice(0, 140);
+  const fileSpanCount = Array.isArray(capture.reported)
+    ? capture.reported.filter((s) => s && s.file && (s.source === "attributed" || s.source === "reported")).length
+    : 0;
   return {
     id: capture.id,
     createdAt: capture.createdAt,
@@ -135,7 +240,45 @@ export function toSummary(capture: StoredCapture): CaptureSummary {
     status: capture.status,
     error: capture.error,
     preview: preview || "Empty prompt",
+    fileSpanCount,
   };
+}
+
+export function hashPromptText(text: string): string {
+  return crypto.createHash("sha256").update(text.trim()).digest("hex").slice(0, 16);
+}
+
+export function extractCleanQuote(rawQuote?: string): string | null {
+  if (!rawQuote || typeof rawQuote !== "string") {
+    return null;
+  }
+  const lines = rawQuote
+    .split(/\r?\n/)
+    .map((l) => l.replace(/^[\s'"`,]+|[\s'"`,]+$/g, "").trim())
+    .filter((l) => l.length >= 20);
+  return lines[0] ?? (rawQuote.trim().length >= 10 ? rawQuote.trim() : null);
+}
+
+export function matchCachedAttribution(
+  content: string,
+  attributions: CachedAttribution[],
+): CachedAttribution | null {
+  if (!content || !content.trim()) {
+    return null;
+  }
+  const fingerprint = hashPromptText(content);
+  for (const attr of attributions) {
+    if (attr.fingerprint === fingerprint) {
+      return attr;
+    }
+  }
+  for (const attr of attributions) {
+    const q = attr.cleanQuote || attr.quote;
+    if (q && q.length >= 20 && content.includes(q)) {
+      return attr;
+    }
+  }
+  return null;
 }
 
 async function writeJson(file: string, value: unknown): Promise<void> {

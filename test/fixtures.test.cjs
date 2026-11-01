@@ -19,6 +19,15 @@ const {
 } = require("../out/helperTools.js");
 const { applyEnv, readEnvStatus, restoreEnv } = require("../out/env.js");
 const { planRewrite } = require("../out/redirect.js");
+const {
+  extractContextSections,
+  buildDeterministicTelemetry,
+  applyTelemetryResponse,
+  buildTelemetrySkeleton,
+  parseTelemetryResponse,
+  TelemetryCache,
+  TELEMETRY_SYSTEM,
+} = require("../out/telemetry.js");
 
 test("Project A Fixture: Electron/Node App with external user config (OptimalX Desktop)", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ct-demo-project-a-"));
@@ -614,3 +623,272 @@ test("Dynamic Attribution Fixture C: RAG pipeline injecting dynamic context snip
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("Telemetry Fixture A: 12-turn conversational chat with history collapse and bloat advisory", async () => {
+  // Construct a 12-turn dialogue (system prompt + 5 user/assistant turns + active user query)
+  const messages = [
+    {
+      role: "system",
+      content: "You are an autonomous engineering assistant. Answer concisely and use standard markdown format.",
+      truncated: false,
+    },
+    // Turn 1
+    { role: "user", content: "How do I list files in Linux?", truncated: false },
+    { role: "assistant", content: "Use the ls command, for example ls -la.", truncated: false },
+    // Turn 2
+    { role: "user", content: "How do I check free disk space?", truncated: false },
+    { role: "assistant", content: "Use df -h to see human-readable disk free space.", truncated: false },
+    // Turn 3
+    { role: "user", content: "What about RAM usage?", truncated: false },
+    { role: "assistant", content: "Use free -m or free -h.", truncated: false },
+    // Turn 4
+    { role: "user", content: "How do I monitor running processes?", truncated: false },
+    { role: "assistant", content: "You can use top, htop, or ps aux.", truncated: false },
+    // Turn 5
+    { role: "user", content: "How do I kill an unresponsive process?", truncated: false },
+    { role: "assistant", content: "Find the PID and run kill -9 <PID>.", truncated: false },
+    // Active query (Turn 6)
+    { role: "user", content: "Can you write a system monitoring bash script that checks all of these?", truncated: false },
+  ];
+
+  // 1. Context Decomposition
+  const sections = extractContextSections(messages);
+  assert.equal(sections.length, 3, "Should produce 3 sections: system, collapsed history, and active query");
+
+  assert.equal(sections[0].heuristicCategory, "system_instruction");
+  assert.equal(sections[0].role, "system");
+
+  assert.equal(sections[1].heuristicCategory, "chat_history");
+  assert.equal(sections[1].isCollapsedHistory, true);
+  assert.equal(sections[1].turns, 5, "Should collapse 5 prior user turns");
+  assert.deepEqual(sections[1].messageIndices, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+
+  assert.equal(sections[2].heuristicCategory, "user_query");
+  assert.equal(sections[2].messageIndex, 11);
+
+  // 2. Simulated Meta AI Telemetry Response
+  const mockModelOutput = JSON.stringify({
+    sections: [
+      {
+        sectionId: sections[0].sectionId,
+        category: "system_instruction",
+        what: "Engineering Assistant Persona & Formatting Rules",
+        why: "Guides model tone and mandates markdown formatting.",
+      },
+      {
+        sectionId: sections[1].sectionId,
+        category: "chat_history",
+        what: "Linux CLI Troubleshooting Dialogue Backlog (5 turns)",
+        why: "Preserves conversational history so the model knows which commands to include in the script.",
+        warning: "Dialogue backlog consumes 68% of token budget; consider pruning turns 1-3.",
+      },
+      {
+        sectionId: sections[2].sectionId,
+        category: "user_query",
+        what: "Bash Script Generation Request",
+        why: "Primary user instruction for the completion.",
+      },
+    ],
+    warnings: ["Chat history backlog is heavy (68% of context window)"],
+  });
+
+  const parsed = parseTelemetryResponse(mockModelOutput);
+  assert.ok(parsed);
+
+  const telemetry = applyTelemetryResponse("fixture-a-cap", sections, parsed);
+  assert.equal(telemetry.sections.length, 3);
+  assert.equal(telemetry.sections[0].what, "Engineering Assistant Persona & Formatting Rules");
+  assert.equal(telemetry.sections[1].category, "chat_history");
+  assert.match(telemetry.sections[1].warning, /pruning turns/);
+  assert.ok(telemetry.warnings.some((w) => w.includes("heavy")));
+
+  // Verify composition calculation
+  const historyComp = telemetry.composition.find((c) => c.category === "chat_history");
+  assert.ok(historyComp);
+  assert.ok(historyComp.percentage > 50, "Chat history should represent majority of token percentage");
+});
+
+test("Telemetry Fixture B: RAG pipeline with 3 vector search context chunks and citation instructions", async () => {
+  const compositeRagPrompt = [
+    "Reference Documents:",
+    "Doc 1: PostgreSQL 16 streaming replication configuration requires setting wal_level = replica.",
+    "Doc 2: Automatic failover in Patroni uses DCS (etcd/Consul) to achieve consensus on leader promotion.",
+    "Doc 3: Standby nodes must configure primary_conninfo pointing to active primary VIP.",
+    "",
+    "Question: How does Patroni decide which replica to promote when primary goes offline?",
+  ].join("\n");
+
+  const messages = [
+    {
+      role: "system",
+      content: "You are an infrastructure database architect. Answer strictly based on the provided reference documents. Cite Doc numbers.",
+      truncated: false,
+    },
+    {
+      role: "user",
+      content: compositeRagPrompt,
+      truncated: false,
+    },
+  ];
+
+  // 1. Context Decomposition should split composite RAG into RAG grounding + user query
+  const sections = extractContextSections(messages);
+  assert.equal(sections.length, 3);
+  assert.equal(sections[0].heuristicCategory, "system_instruction");
+  assert.equal(sections[1].heuristicCategory, "rag_grounding");
+  assert.equal(sections[2].heuristicCategory, "user_query");
+
+  // 2. Telemetry Generation
+  const cache = new TelemetryCache(50);
+  const mockModelOutput = JSON.stringify({
+    sections: [
+      {
+        sectionId: sections[0].sectionId,
+        category: "system_instruction",
+        what: "DBA Architect Persona & Citation Constraints",
+        why: "Mandates citation of source documents and prevents speculative answers.",
+      },
+      {
+        sectionId: sections[1].sectionId,
+        category: "rag_grounding",
+        what: "PostgreSQL 16 High Availability & Failover Documentation",
+        why: "Supplies external DCS and Patroni consensus facts required to answer the query.",
+      },
+      {
+        sectionId: sections[2].sectionId,
+        category: "user_query",
+        what: "Patroni Promotion Mechanism Query",
+        why: "Direct user prompt for the assistant to resolve using retrieved docs.",
+      },
+    ],
+  });
+
+  const parsed = parseTelemetryResponse(mockModelOutput);
+  const telemetry = applyTelemetryResponse("fixture-b-cap", sections, parsed, cache);
+
+  assert.equal(telemetry.sections.length, 3);
+  const ragSection = telemetry.sections.find((s) => s.category === "rag_grounding");
+  assert.ok(ragSection);
+  assert.equal(ragSection.what, "PostgreSQL 16 High Availability & Failover Documentation");
+  assert.match(ragSection.why, /Patroni consensus/);
+
+  // 3. Verify bridge to Sensory Attribution Harness:
+  // Using the extracted RAG section content, we can run attributionTools to locate the documentation file in the repo
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ct-demo-rag-telemetry-"));
+  try {
+    fs.mkdirSync(path.join(root, "docs", "architecture"), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, "docs", "architecture", "postgres_ha.md"),
+      [
+        "# PostgreSQL 16 HA Architecture",
+        "Automatic failover in Patroni uses DCS (etcd/Consul) to achieve consensus on leader promotion.",
+        "Standby nodes must configure primary_conninfo pointing to active primary VIP.",
+      ].join("\n"),
+    );
+
+    const tools = attributionTools(root);
+    const searchTool = tools.find((t) => t.name === "search_text");
+    const searchResult = await searchTool.run({ query: "Patroni uses DCS" });
+    assert.match(searchResult.content, /postgres_ha\.md/);
+    assert.match(searchResult.content, /consensus on leader promotion/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Telemetry Fixture C: Tool-calling agent context with complex JSON schema definitions and cache reuse", async () => {
+  const toolDefinitions = [
+    {
+      type: "function",
+      function: {
+        name: "execute_sql_query",
+        description: "Executes a read-only SQL query against the analytics database replica.",
+        parameters: {
+          type: "object",
+          properties: {
+            query: { type: "string", description: "SELECT query to run" },
+            max_rows: { type: "integer", default: 100 },
+          },
+          required: ["query"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "generate_chart",
+        description: "Renders an interactive chart artifact from structured data points.",
+        parameters: {
+          type: "object",
+          properties: {
+            chart_type: { type: "string", enum: ["bar", "line", "scatter"] },
+            data: { type: "array" },
+          },
+          required: ["chart_type", "data"],
+        },
+      },
+    },
+  ];
+
+  const messages = [
+    { role: "system", content: "You are a quantitative data analyst.", truncated: false },
+    { role: "tools", content: JSON.stringify(toolDefinitions, null, 2), truncated: false },
+    { role: "user", content: "Plot the monthly active users for 2026.", truncated: false },
+  ];
+
+  // 1. Context Decomposition identifies schema_tool_spec
+  const sections = extractContextSections(messages);
+  assert.equal(sections.length, 3);
+  assert.equal(sections[1].heuristicCategory, "schema_tool_spec");
+  assert.equal(sections[1].role, "tools");
+
+  // 2. Cache test: TelemetryCache stores tool specification analysis
+  const cache = new TelemetryCache(50);
+  const mockModelOutput = JSON.stringify({
+    sections: [
+      {
+        sectionId: sections[0].sectionId,
+        category: "system_instruction",
+        what: "Quantitative Analyst Persona",
+        why: "Directs statistical tone and analytical approach.",
+      },
+      {
+        sectionId: sections[1].sectionId,
+        category: "schema_tool_spec",
+        what: "Analytics DB & Charting Function Schemas",
+        why: "Enables model to execute SQL queries and render interactive visualizations.",
+      },
+      {
+        sectionId: sections[2].sectionId,
+        category: "user_query",
+        what: "Monthly Active Users Visualization Query",
+        why: "Specific analytical directive for this run.",
+      },
+    ],
+  });
+
+  const parsed = parseTelemetryResponse(mockModelOutput);
+  const telemetry1 = applyTelemetryResponse("fixture-c-1", sections, parsed, cache);
+
+  // Tools fingerprint is now cached
+  const toolsFingerprint = sections[1].fingerprint;
+  assert.equal(cache.has(toolsFingerprint), true);
+  assert.equal(cache.get(toolsFingerprint).what, "Analytics DB & Charting Function Schemas");
+
+  // Subsequent request with novel user query but identical tool definitions hits cache in 0 tokens / 0 ms
+  const messages2 = [
+    { role: "system", content: "You are a quantitative data analyst.", truncated: false },
+    { role: "tools", content: JSON.stringify(toolDefinitions, null, 2), truncated: false },
+    { role: "user", content: "Compute churn rate for Q2.", truncated: false },
+  ];
+
+  const sections2 = extractContextSections(messages2);
+  const telemetry2 = applyTelemetryResponse("fixture-c-2", sections2, null, cache);
+
+  // Tool section re-used from cache without model call
+  const cachedToolSection = telemetry2.sections.find((s) => s.category === "schema_tool_spec");
+  assert.ok(cachedToolSection);
+  assert.equal(cachedToolSection.what, "Analytics DB & Charting Function Schemas");
+  assert.equal(cachedToolSection.why, "Enables model to execute SQL queries and render interactive visualizations.");
+});
+

@@ -1,6 +1,6 @@
 import path from "path";
 import { locationsFor } from "./indexer";
-import { isInside, resolveProjectFile, toRelative } from "./paths";
+import { isHomeConfigPath, isInside, resolveProjectFile, toRelative } from "./paths";
 import type { ProjectIndex, ReportedSpan, SpanSource, ViewSpan } from "./types";
 
 type LineSlice = { text: string; start: number; end: number };
@@ -318,7 +318,7 @@ function toViewSpans(content: string, role: string, fileSpans: FileSpan[], index
       pushGap(cursor, span.charStart);
     }
     const absolute = span.absolutePath ?? (span.source === "matched" && index ? path.join(index.root, span.file) : undefined);
-    const canOpen = Boolean(absolute && index && isInside(index.root, absolute));
+    const canOpen = Boolean(absolute && ((index && isInside(index.root, absolute)) || isHomeConfigPath(absolute)));
     spans.push({
       id: `file-${count}`,
       text: content.slice(span.charStart, span.charEnd),

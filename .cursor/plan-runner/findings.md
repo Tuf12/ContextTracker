@@ -1,84 +1,90 @@
 # Plan run findings
 
-- Plan path: docs/plans/semantic-attribution.md
-- Started: Saturday, Oct 31, 2026, 2:45 PM (UTC-5)
+- Plan path: docs/plans/context-telemetry.md
+- Started: Sunday, Nov 1, 2026, 9:49 AM (UTC-6)
 
-## Phase 1: Phase 1: Template Asset Scope & Indexer Expansion
+## Phase 1: Phase 1: Context Decomposition, Triage & Caching Engine
 
 ### Discrepancies
 
-- Phase 1 changes are **uncommitted** (working-tree edits to `src/indexer.ts` and `test/trace.test.cjs` only; not on `HEAD`).
-- Plan **1.1** lists adding `.jinja`, `.j2`, and `.prompt`; those extensions were **already** in `EXTENSIONS` at `HEAD`. This phase adds `.template`, `.mustache`, and `.hbs` as required, plus non-plan extras `.jinja2`, `.tpl`, and `.liquid`.
-- Plan **1.2** asks to ensure template assets are not excluded by **size limits**; implementation does not add template-specific handling or tests—`readIndexedFile` still skips files over `MAX_FILE_BYTES` (400KB) and zero-byte files, same as before.
-- Architecture **§2.1** (referenced by the phase objective) mentions **external discovered configuration prompt paths**; no indexer logic for config-discovered paths appears in the Phase 1 diff (only `prompts/`, `templates/`, and `prompt_templates/` parent dirs for extensionless files).
-- Plan **1.3** cites Jinja2 indexing; the new test indexes `.jinja2` but does **not** include a `.j2`-named fixture (though `.j2` remains in `EXTENSIONS`).
+- Phase 1 deliverables are **uncommitted** (untracked `src/telemetry.ts`, `test/telemetry.test.cjs`; modified `src/types.ts`; not on `HEAD`).
+- Plan **1.1** specifies `extractContextSections(messages, tools)`; implementation is `extractContextSections(messages, options?)` only—tool schemas are handled when `parse.ts` injects a `role: "tools"` message, not via a separate `tools` argument.
+- Plan **3.1** (later phase) owns telemetry types on `StoredCapture` / `CaptureView` / `ViewMessage`; Phase 1 already adds `CaptureTelemetry`, `SectionTelemetry`, `CategoryComposition`, optional `telemetry` fields, and internal `ContextSection` (with extra `messageIndices` on `SectionTelemetry` vs plan §3.1).
+- Plan **1.3** describes caching **prior Meta AI telemetry results**; `TelemetryCache` is generic, but `buildDeterministicTelemetry` only **writes** cache entries from **heuristic fallbacks** (`generateFallbackSectionTelemetry`) for `system_instruction` and `schema_tool_spec`—no Meta AI population yet (expected in Phase 2).
+- `hashText` uses SHA-256 then **truncates to 16 hex characters** (plan wording implies full fingerprint; collision surface is larger than a full digest).
+- History collapse (**1.2**) groups **`tool`** role messages with user/assistant backlog; the plan text names **user/assistant** turns only.
+- Phase 1 scope lists extractor, collapser, cache, and tests; the same module also ships **`splitRagUserQuery`** (active-message RAG/query split), **`buildDeterministicTelemetry`**, composition helpers, and **`CATEGORY_COLORS`** (UI-oriented; plan Phase 4).
+- Tests cover system cache reuse on repeat captures; there is **no dedicated cache-hit test** for identical **tool schema** fingerprints (only LRU mechanics with arbitrary hash keys).
 
 ### User checks (deferred)
 
 - None.
 
-## Phase 2: Phase 2: Autonomous Semantic Attribution Prompting & Tools
+## Phase 2: Phase 2: Meta AI Telemetry System Prompting & Client Integration
 
 ### Discrepancies
 
-- Phase 2 deliverables are **uncommitted** (working-tree edits to `src/helperTools.ts`, `src/types.ts`, `test/helper.test.cjs`, plus a small `src/app.ts` `helperStepLabel` branch for `attribute_prompt`; not on `HEAD`).
-- Plan **2.1** / architecture **§3.3** call for line numbers within file bounds before acceptance; `attributePrompt` **clamps** `endLine` to `totalLines` instead of rejecting out-of-range `endLine`, and returns `finish.endLine` as the clamped value.
-- Plan **2.1** says to validate that the **matched snippet corresponds to the code**; `matchedSnippet` is **optional** in the tool schema and snippet checks are **skipped** when omitted, so attributions can succeed with file/line validation only.
-- When `matchedSnippet` is provided, verification is **loose** (case-insensitive substring or any snippet line longer than 5 chars), which is weaker than strict correspondence to the attributed line range.
-- Plan **2.4** harness completion is covered by tests that **mock** `complete` (simulated Muse tool turns); they do not exercise the live Meta helper client or Muse Spark / Wonder endpoints.
-- Plan **2.2** emphasizes **parallel** `search_text` (and read) in a single turn; the harness fixture uses **one** `search_text` call in turn 1 and does not assert parallel multi-query behavior.
-- **`buildAttributionUserPrompt`** truncates captured content at 2000 characters (not specified in plan **2.3**); it includes project name and model but not project filesystem path.
-- Minor cross-phase prep in the same diff: `AttributedSpan` in `src/types.ts` and UI step copy in `app.ts`—Phase 3 owns wiring attribution into captures/UI per the plan.
+- Phase 2 deliverables are **uncommitted** (untracked `src/telemetry.ts`, `test/telemetry.test.cjs`; modified `src/app.ts`, `src/helperClient.ts`; bundled with Phase 1 type changes; not on `HEAD`).
+- Plan **2.1** / §4.1 **`TELEMETRY_SYSTEM`** is implemented in `src/telemetry.ts` with the same categories and mission text; plan **Bad/Good** contrast examples are shortened to single **Example:** lines (substantively aligned).
+- Plan **2.1** calls for **strict JSON schema** validation (`TelemetryResponse`); implementation uses TypeScript types plus **`parseTelemetryResponse`** (fence stripping, per-field checks, unknown categories coerced to **`runtime_data`**, invalid section rows dropped)—not a JSON Schema validator and no rejection of the whole payload on partial invalidity.
+- Plan **2.2** JSON parse failures: **`parseTelemetryResponse` → `null`** still runs the Meta AI success path (`applyTelemetryResponse` with heuristics/cache only) and emits **`🤖 Meta AI Telemetry: …`** without distinguishing fallback-from-parse-failure from a valid model payload (only **thrown** errors get **`⚠️ Telemetry fallback applied`**).
+- Plan **2.2** cache + batching: **`novelSections`** are sent in the skeleton only; full **`sections`** are merged via **`applyTelemetryResponse`** (aligned). When **`novelSections.length === 0`**, Meta AI is skipped entirely in favor of **`buildDeterministicTelemetry`** (aligned with full cache hit).
+- Plan **2.3** example console line uses **`🤖 Meta AI Telemetry: … identified 48% RAG grounding`**; the live Meta AI finish event matches that pattern with **`categoryLabel`** (e.g. “RAG Grounding”). The **no-helper / all-cached** path uses **`📊 Context Telemetry:`** instead of the Meta AI prefix.
+- Plan **2.4** unit tests cover skeleton redaction, **`parseTelemetryResponse`**, and **`applyTelemetryResponse`** with a mock model object; there is **no test** of **`TrackerApp.analyzeContextTelemetry`**, **no mocked `completeChat`** telemetry round-trip, **no explicit `applyTelemetryResponse(…, null)`** parse-failure case, and **`TELEMETRY_SYSTEM`** is imported in **`test/telemetry.test.cjs`** but **unused**.
+- Cross-phase prep in the same diff: **`analyzeTelemetry`** webview action and **`capture.telemetry` + `store.update`** (plan **3.2**), while **`deriveCapture`** still omits **`telemetry`** on **`CaptureView`** (plan **3.2**); **`helperStepLabel("analyze_telemetry")`** has no matching harness tool name in the telemetry flow (telemetry uses **`completeChat`** without tools).
+- **`completeChat`** now treats **`tools`** as optional (required for telemetry’s tool-less completion); change is outside Phase 2 bullet list but supports **2.2**.
 
 ### User checks (deferred)
 
 - None.
 
-## Phase 3: Phase 3: Extension Pipeline & Span Integration
+## Phase 3: Phase 3: Extension Pipeline, Data Persistence & Bridge to Loop 4
 
 ### Discrepancies
 
-- Phase 3 deliverables are **uncommitted** (working-tree edits to `src/types.ts`, `src/matcher.ts`, `src/app.ts`, and `test/trace.test.cjs`; bundled in the same diff as Phases 1–2 and not on `HEAD`).
-- Plan **3.1** lists attribution metadata on **`StoredCapture`**; implementation adds `confidence` / `explanation` (and optional `source`) on **`ReportedSpan`** and **`ViewSpan`** only—no new top-level fields on `StoredCapture`.
-- Plan **3.2** allows a dedicated **`attributedSpans` map**; implementation stores attributions in **`capture.reported`** with `source: "attributed"`, replacing prior attributed rows for the same `messageIndex` (aligned with the “or reported” option, not a separate map).
-- Plan **3.3** names **`src/derive.ts`**; **`derive.ts` is unchanged**—integration is entirely in **`matcher.ts`** (`placeOne`, `combineSpans`, `fileLabel`, `ViewSpan` fields) while `deriveCapture` already passes per-message `reported` into `deriveMessageSpans`.
-- Plan **3.3** requires attributed spans alongside exact matches **without collision**; `combineSpans` implements overlap handling, but **3.4 adds no test** where both a passive **matched** span and an **attributed** span apply to the same message (only a dynamic-prompt case with no asserted exact matches).
-- Plan **3.4** persistence test **simulates** attribution by pushing to `capture.reported` and calling `store.update`; it does **not** exercise **`TrackerApp.attributeCaptureMessage`** or the **`attributeMessage`** webview action (Phase 4 UI for the button is still absent in `media/panel.js`).
-- **`attributeCaptureMessage`** wires the **live** `completeChat` Meta helper client; there is **no unit test** mocking that path (unlike Phase 2 harness tests in `test/helper.test.cjs`).
-- Attributed placement when **`quote` is absent** falls back to highlighting the **entire message** (`charStart` 0 … `charEnd` `content.length`), which is broader than a file-line span and may interact aggressively with overlap logic when exact matches exist (behavior not covered by tests).
+- Phase 3 deliverables are **uncommitted** (modified `src/types.ts`, `src/derive.ts`, `src/app.ts`, `test/trace.test.cjs`; bundled with Phases 1–2 telemetry work; not on `HEAD`).
+- Plan **3.1** lists types on `StoredCapture` / `CaptureView` / `ViewMessage`; all three are present. Architecture **§3.2** allows **`telemetry?: SectionTelemetry` or telemetry badge list**; implementation binds **one** `SectionTelemetry` per message via `deriveCapture` **`.find()`**, so a message split into multiple sections (e.g. **`msg-N-rag`** and **`msg-N-query`** on the same index) only surfaces **the first** matching section in the view.
+- Plan **3.2** names **`src/store.ts`**; **`store.ts` is unchanged**—`telemetry` persists because captures are written as full JSON (`add` / `update`), with no store-specific field handling or migration.
+- Plan **3.2** **`deriveCapture`** / **`presentCapture`**: **`deriveCapture`** now copies capture-level **`telemetry`** and attaches per-message **`telemetry`** (including **`messageIndices`** for collapsed history); **`presentCapture`** retains capture **`telemetry`** and keeps message **`telemetry`** via message spread (covered in tests).
+- Plan **3.3** **Bridge to Loop 4**: **not implemented**. There is no **“✨ Trace in Code”** control in **`media/panel.js`**, no webview action that passes a telemetry section into attribution, and **`analyzeTelemetry`** is handled in **`src/app.ts`** but **never posted** from the panel. Existing **`attributeMessage`** → **`attributeCaptureMessage`** (Loop 4) remains separate; **`attributeCaptureMessage`** already accepts optional **`content`**, but nothing in the telemetry pipeline invokes it for RAG/template sections.
+- Plan **3.4** persistence / derivation roundtrip: **`test/trace.test.cjs`** adds reload-via-**`CaptureStore`**, **`deriveCapture`**, and **`presentCapture`** assertions; it does **not** exercise **`TrackerApp.analyzeContextTelemetry`** → **`store.update`**, collapsed-history multi-index binding, or the Loop 4 bridge (expected once **3.3** / Phase 4 UI exist).
+- Residual cross-phase note: **`helperStepLabel("analyze_telemetry")`** has no matching harness tool name (telemetry uses tool-less **`completeChat`**).
 
 ### User checks (deferred)
 
 - None.
 
-## Phase 4: Phase 4: UI Actions & Interactive Attribution Badges
+## Phase 4: Phase 4: Webview UI Rendering (Composition Bar & Anatomy Badges)
 
 ### Discrepancies
 
-- Phase 4 deliverables are **uncommitted** (working-tree edits to `media/panel.js` and `media/panel.css`; `attributeMessage` handling in `src/app.ts` is in the same diff and required for the button to function).
-- Plan **4.1** shows the button when `spans.length === 0` **or** there are no file spans; implementation sets `canAttribute = !hasFileSpan && message.spans.length > 0 && message.role !== "assistant"`, so messages with **zero spans** (e.g. empty content) never get the button—the **`spans.length > 0`** guard contradicts the plan’s first condition (typical unmatched prompts still get a runtime gap span, so the primary dynamic-prompt case is covered).
-- Plan **4.1** does not restrict by role; the UI **hides** the control on **assistant** messages.
-- Plan **4.1** loading state is local (`Attributing…`, `attributingMessage`) plus extension `helperBusy` / status bar; the button is also **disabled whenever `state.helper.busy`** for any helper operation, not only attribution.
-- Plan **4.2** tooltip text *"Attributed by Meta AI: [explanation]"*; implementation matches when `explanation` is set but **appends confidence** `(confidence: N%)`, and when `explanation` is missing the `title` falls back to **`span.label`** instead of the prescribed prefix.
-- Plan **4.2** “clicking the span opens the source file”: **block headers** call `openSpan` (opens editor at lines when `canOpen`); **bar** segment buttons still call **`focusSpan`** (scroll/highlight only)—same as pre-existing matched-span behavior, not full open-on-click for the bar slice.
-- No **automated or webview tests** for `attributeMessage`, loading UI, badges, or tooltips (plan does not require Phase 4 tests; coverage remains manual / extension-only).
+- Phase 4 deliverables are **uncommitted** (modified `media/panel.js`, `media/panel.css`; bundled with Phases 1–3 telemetry work; branch **ahead 3** of `origin/main`, not isolated on `HEAD` as a Phase-4-only commit).
+- Plan **4.1** / §5.1 imply a **category-level** composition bar (e.g. one segment per budget share); the bar renders **`telemetry.sections`** (one segment per section). Aggregated token counts and percentages appear in the **legend** from **`telemetry.composition`**, not as bar segment labels on the bar itself.
+- Plan **4.1** “under capture header”: UI places **`renderTelemetryBar`** after the quiet token/file-match line and **before** the existing file-slice **`bar()`**—aligned with §5.1 “below the capture stats bar,” not immediately under the model title row.
+- Plan **4.2** requires anatomy above **messages and gap spans**; cards attach only at **`renderMessage`** (per message). **`renderSpan`** / matcher **gap** spans get no telemetry UI.
+- When **`splitRagUserQuery`** yields multiple sections on one **`messageIndex`**, **`deriveCapture`** still binds **one** `SectionTelemetry` per message (**.find()**); Phase 4 shows at most **one** anatomy card per message and segment clicks always scroll to that index (no per-section anchor within a message).
+- Plan **4.2** / Phase **3.3** **“✨ Trace in Code”**: button is present on anatomy cards and posts **`attributeMessage`**, but **`renderAnatomyCard`** does **not** pass optional **`content`** (nor section id)—attribution uses the **full message** like the legacy control. **`canTrace`** hides the button for **assistant** messages and messages with **file** spans.
+- Plan **4.4** names **`.badge-rag`**, **`.badge-system`**, etc.; CSS uses **`.badge-category`** plus **`.cat-{category}`** (e.g. **`.cat-rag_grounding`**). **`CategoryComposition.colorVar`** from telemetry is **unused** in the webview (colors come from static CSS variables).
+- Plan **4.3** / §5.3: capture-level **`telemetry.warnings`** render as **`.telemetry-advisory`** banners; per-section **`telemetry.warning`** uses **`.anatomy-warning-pill`** (aligned in spirit). No Phase 4 unit or webview tests (plan does not require them for this phase).
+- Extra UX not listed in Phase 4 bullets: empty-state / re-run **`analyzeTelemetry`** controls, helper chip **“📊 Context telemetry”**, and hiding **“✨ Attribute with Meta AI”** when message **`telemetry`** exists (replaced by anatomy **Trace in Code** where **`canTrace`**).
 
 ### User checks (deferred)
 
 - None.
 
-## Phase 5: Phase 5: Dynamic Prompt Test Fixtures & Video Script Update
+## Phase 5: Phase 5: RAG & Multi-Turn Test Fixtures & Video Script Documentation
 
 ### Discrepancies
 
-- Phase 5 deliverables are **uncommitted** (working-tree edits to `test/fixtures.test.cjs` and `HACKATHON_SHOWCASE.md`; tracked on `HEAD` but modified, not committed).
-- Phase **objective** calls for **end-to-end** attribution on diverse dynamic prompts; the three new tests exercise **`runHarness` + `ATTRIBUTION_SYSTEM` with a mocked `complete` callback** only—they do not run capture → passive matcher (0 spans) → **`attributeCaptureMessage`** / panel UI → span persistence.
-- Plan **5.1 Fixture B** specifies Jinja2 with **loops and conditional blocks**; the fixture template uses a **`{% for %}` loop only** (no `{% if %}` / conditional block in template or rendered prompt).
-- Plan **5.1 Fixture C** names a **RAG pipeline**; implementation is a **static** `prompts/rag_system.prompt` plus a hand-built dynamic prompt string with injected chunk text—no retrieval/injection code path or vector-store component under test.
-- Dynamic fixture tests **script** one `search_text` then `attribute_prompt` in two turns; they do not assert that **`search_text` / `read_file` discover** the attributed file from disk (unlike a live Muse run), only that the harness accepts the mocked tool sequence and **`attribute_prompt` validation** against written temp files.
-- **`attributePrompt`** is imported in `test/fixtures.test.cjs` but **unused** (minor dead import in the Phase 5 diff).
-- Plan **5.2** / showcase **Loop 4** and the video script mention attribution **“(or it runs autonomously)”**; the extension UI (Phase 4) exposes a **manual** **“Attribute with Meta AI”** button only—no autonomous attribution trigger is implemented.
-- **Showcase copy inconsistency:** Loop 4 and the **[1:15–1:55]** script use example paths **`prompts/analyst.prompt` lines 1–5**, while the fixture table and tests use **`src/assistant.py`**, **`templates/review_analyst.jinja2`**, and **`prompts/rag_system.prompt`** with different line ranges.
+- Phase 5 deliverables are **uncommitted** (modified `test/fixtures.test.cjs`, `HACKATHON_SHOWCASE.md`; bundled with Phases 1–4 telemetry work; branch **ahead 3** of `origin/main`).
+- Plan **objective** calls for **end-to-end** verification on diverse patterns; telemetry fixtures exercise **`extractContextSections` → mocked `parseTelemetryResponse` / `applyTelemetryResponse`** only—no **`TrackerApp.analyzeContextTelemetry`**, no **`buildTelemetrySkeleton` + `completeChat`**, and no live Meta AI round-trip (reasonable for hardware constraints but narrower than “end-to-end”).
+- Plan **5.1 Fixture A** (“12-turn conversational chat”): fixture builds **12 messages** (system + **5** user/assistant pairs + trailing query) and collapses **5** prior user turns; **`HACKATHON_SHOWCASE.md`** table copy says **“12-turn chat history + active query”**, which overstates the collapsed backlog (10 history messages / 5 exchanges).
+- Fixture A **68% token share**: advisory text and mock **`warning`** mention **68%**; the test only asserts history **`composition.percentage > 50`**, not **68%**—showcase table claim **“calculates 68% token share”** is not asserted in code.
+- Plan **5.1 Fixture B** / showcase **“bridges to Loop 4 Trace in Code”**: test validates **`attributionTools` → `search_text`** on RAG-like text in a temp repo, not the product **Trace in Code** path (**`attributeMessage` / `attributeCaptureMessage`** with telemetry section content)—consistent with Phase 3/4 bridge gaps noted earlier.
+- Plan **5.1 Fixture C**: cache reuse is proven via **`applyTelemetryResponse(..., null, cache)`** on a second capture with identical tools; it does not run **`analyzeContextTelemetry`** or **`buildDeterministicTelemetry`** cache population paths.
+- **`test/fixtures.test.cjs`** Phase 5 telemetry imports include unused **`buildDeterministicTelemetry`**, **`buildTelemetrySkeleton`**, and **`TELEMETRY_SYSTEM`** (fixture tests only use **`extractContextSections`**, **`parseTelemetryResponse`**, **`applyTelemetryResponse`**, **`TelemetryCache`**).
+- Plan phase **title** includes **“Video Script Documentation”**; bullets under **5.2** only name **`HACKATHON_SHOWCASE.md`**. Implementation updates **§4 3-Minute Video Pitch** and rubric text there (no separate video script file)—substantively aligned with **5.2**, not a standalone doc.
+- Plan **5.2** asks to document **Loop 4 + Loop 6** for judges: showcase adds **Loop 6** section with **Loop 6 → Loop 4 Bridge**, weaves both into **§4** voiceover, and updates rubric rows—no dedicated combined narrative section beyond those cross-links.
 
 ### User checks (deferred)
 

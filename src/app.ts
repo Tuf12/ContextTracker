@@ -9,11 +9,20 @@ import { ADDRESS_SYSTEM, addressTools, ATTRIBUTION_SYSTEM, attributionTools, bui
 import { runHarness } from "./harness";
 import { panelHtml } from "./html";
 import { indexProject } from "./indexer";
-import { isInside, projectKey, resolveAddressFile, resolveProjectFile } from "./paths";
+import { isHomeConfigPath, isInside, projectKey, resolveAddressFile, resolveProjectFile } from "./paths";
 import { CAPTURE_PORT, chooseUpstream, startRecorder, type RecorderCapture, type RecorderServer } from "./recorder";
 import { armRedirect, chooseEndpoint, endpointLabel, findEndpoints, planRewrite, restoreAllRedirects, type FoundEndpoint } from "./redirect";
-import { CaptureStore } from "./store";
-import type { AddressOffer, AttributedSpan, HelperActivityItem, HelperActivityKind, ProjectIndex, ProjectView, ReportedSpan, RouteSettings, StoredCapture, ViewState } from "./types";
+import { CaptureStore, extractCleanQuote, hashPromptText, matchCachedAttribution } from "./store";
+import {
+  applyTelemetryResponse,
+  buildDeterministicTelemetry,
+  buildTelemetrySkeleton,
+  extractContextSections,
+  globalTelemetryCache,
+  parseTelemetryResponse,
+  TELEMETRY_SYSTEM,
+} from "./telemetry";
+import type { AddressOffer, AttributedSpan, CachedAttribution, CaptureTelemetry, HelperActivityItem, HelperActivityKind, ProjectIndex, ProjectView, ReportedSpan, RouteSettings, StoredCapture, ViewState } from "./types";
 import { TrafficWatchdog } from "./watchdog";
 
 const PROJECT_KEY = "contextTracker.projectPath";
@@ -37,6 +46,7 @@ export class TrackerApp {
   private index: ProjectIndex | null = null;
   private indexGeneration = 0;
   private summaries: ViewState["captures"] = [];
+  private projectAttributions: CachedAttribution[] = [];
   private selectedId: string | null = null;
   private selected: StoredCapture | null = null;
   private compareId: string | null = null;
@@ -237,7 +247,13 @@ export class TrackerApp {
         return;
       case "attributeMessage":
         if (typeof body.captureId === "string" && typeof body.messageIndex === "number") {
-          await this.attributeCaptureMessage(body.captureId, body.messageIndex);
+          const content = typeof body.content === "string" ? body.content : undefined;
+          await this.attributeCaptureMessage(body.captureId, body.messageIndex, { content });
+        }
+        return;
+      case "analyzeTelemetry":
+        if (typeof body.captureId === "string") {
+          await this.analyzeContextTelemetry(body.captureId);
         }
         return;
       case "openClue":
@@ -314,7 +330,17 @@ export class TrackerApp {
     this.helperRun += 1;
     this.helperBusy = false;
     this.ignoredEndpoints.delete(resolved);
+    this.projectAttributions = await this.store.seedAttributionsFromCaptures(resolved);
     this.summaries = await this.store.list(resolved);
+    if (this.summaries.length > 0 && !this.selectedId) {
+      this.selectedId = this.summaries[0].id;
+      const topCapture = await this.store.get(resolved, this.selectedId);
+      if (topCapture) {
+        this.applyCachedAttributions(topCapture);
+        this.live.set(topCapture.id, topCapture);
+        this.selected = topCapture;
+      }
+    }
     await this.context.globalState.update(PROJECT_KEY, resolved);
     this.refreshStatus();
     this.push();
@@ -772,6 +798,7 @@ export class TrackerApp {
   public async attributeCaptureMessage(
     captureId: string,
     messageIndex: number,
+    options?: { content?: string },
   ): Promise<AttributedSpan | null> {
     if (!this.project) {
       this.lastEvent = "Open a project first.";
@@ -785,7 +812,8 @@ export class TrackerApp {
       return null;
     }
     const message = capture.messages[messageIndex];
-    if (!message.content.trim()) {
+    const targetContent = options?.content?.trim() || message.content;
+    if (!targetContent.trim()) {
       this.lastEvent = "Message has no content to attribute.";
       this.push();
       return null;
@@ -822,7 +850,7 @@ export class TrackerApp {
 
     try {
       const userPrompt = buildAttributionUserPrompt({
-        content: message.content,
+        content: targetContent,
         role: message.role,
         projectName: this.project.name,
         model: capture.model,
@@ -889,6 +917,7 @@ export class TrackerApp {
       }
 
       const attributed = result.finish;
+      const cleanQuote = extractCleanQuote(attributed.matchedSnippet);
       const reportedSpan: ReportedSpan = {
         messageIndex,
         file: attributed.file,
@@ -897,18 +926,52 @@ export class TrackerApp {
         source: "attributed",
         confidence: attributed.confidence,
         explanation: attributed.explanation,
-        quote: attributed.matchedSnippet,
+        quote: cleanQuote || attributed.matchedSnippet,
       };
 
       capture.reported = (capture.reported ?? [])
         .filter((span) => !(span.messageIndex === messageIndex && span.source === "attributed"))
         .concat(reportedSpan);
 
+      const cachedAttr: CachedAttribution = {
+        fingerprint: hashPromptText(targetContent),
+        quote: attributed.matchedSnippet,
+        cleanQuote: cleanQuote ?? undefined,
+        file: attributed.file,
+        startLine: attributed.startLine,
+        endLine: attributed.endLine,
+        confidence: attributed.confidence,
+        explanation: attributed.explanation,
+        attributedAt: new Date().toISOString(),
+      };
+      await this.store.saveAttribution(this.project.path, cachedAttr);
+      const existingIdx = this.projectAttributions.findIndex(
+        (a) => a.fingerprint === cachedAttr.fingerprint || (cachedAttr.cleanQuote && a.cleanQuote === cachedAttr.cleanQuote),
+      );
+      if (existingIdx >= 0) {
+        this.projectAttributions[existingIdx] = cachedAttr;
+      } else {
+        this.projectAttributions.unshift(cachedAttr);
+      }
+
+      for (const [liveId, liveCap] of this.live.entries()) {
+        if (liveId !== capture.id) {
+          if (this.applyCachedAttributions(liveCap)) {
+            await this.enqueue(liveId, () => this.store.update(liveCap));
+          }
+        }
+      }
+
       this.live.set(capture.id, capture);
       if (this.selectedId === capture.id) {
         this.selected = capture;
       }
-      await this.store.update(capture);
+      if (this.compareId === capture.id) {
+        this.compare = capture;
+      }
+      await this.enqueue(capture.id, async () => {
+        this.summaries = await this.store.update(capture);
+      });
 
       this.helperStatus = `Prompt attributed to ${attributed.file}:${attributed.startLine}–${attributed.endLine}`;
       this.lastEvent = this.helperStatus;
@@ -930,6 +993,154 @@ export class TrackerApp {
         text: this.helperStatus,
       });
       return null;
+    } finally {
+      if (run === this.helperRun) {
+        this.helperBusy = false;
+        this.refreshStatus();
+        this.push();
+      }
+    }
+  }
+
+  public async analyzeContextTelemetry(captureId: string): Promise<CaptureTelemetry | null> {
+    if (!this.project) {
+      this.lastEvent = "Open a project first.";
+      this.push();
+      return null;
+    }
+    const capture = this.live.get(captureId) ?? (await this.store.get(this.project.path, captureId));
+    if (!capture || !capture.messages || capture.messages.length === 0) {
+      this.lastEvent = "Capture has no messages to analyze.";
+      this.push();
+      return null;
+    }
+
+    const sections = extractContextSections(capture.messages);
+    const totalTokens = sections.reduce((sum, s) => sum + s.tokenEstimate, 0);
+
+    const novelSections = sections.filter((s) => !globalTelemetryCache.has(s.fingerprint));
+    const apiKey = await this.context.secrets.get(HELPER_SECRET);
+    const hasHelper = Boolean(apiKey?.trim() && this.helperModel.trim());
+
+    if (novelSections.length === 0 || !hasHelper) {
+      const telemetry = buildDeterministicTelemetry(capture.id, capture.messages);
+      capture.telemetry = telemetry;
+      this.live.set(capture.id, capture);
+      if (this.selectedId === capture.id) {
+        this.selected = capture;
+      }
+      if (this.compareId === capture.id) {
+        this.compare = capture;
+      }
+      await this.enqueue(capture.id, async () => {
+        this.summaries = await this.store.update(capture);
+      });
+
+      const topCategory = telemetry.composition[0]?.categoryLabel ?? "General Context";
+      const topPct = telemetry.composition[0]?.percentage ?? 100;
+      const statusText = `Context telemetry: Analyzed ${sections.length} sections (${topPct}% ${topCategory})`;
+      this.lastEvent = statusText;
+      this.recordActivity({
+        kind: "status",
+        text: `📊 Context Telemetry: Analyzed ${sections.length} prompt sections (${topPct}% ${topCategory})`,
+        detail: telemetry.composition.map((c) => `${c.categoryLabel}: ${c.tokens}t (${c.percentage}%)`).join(", "),
+      });
+      this.push();
+      return telemetry;
+    }
+
+    const run = ++this.helperRun;
+    const working = `The AI helper is analyzing context telemetry for ${novelSections.length} novel section${novelSections.length > 1 ? "s" : ""} (${totalTokens} estimated tokens)…`;
+    this.helperBusy = true;
+    this.helperStatus = working;
+    this.lastEvent = working;
+    this.status.text = "$(loading~spin) Analyzing context telemetry";
+    this.status.tooltip = working;
+    this.status.show();
+    this.recordActivity({
+      kind: "status",
+      text: working,
+    });
+    this.push();
+
+    try {
+      const skeletonJson = buildTelemetrySkeleton(novelSections);
+      const userContent = [
+        `Captured Prompt Messages: ${capture.messages.length}`,
+        `Total Estimated Tokens: ${totalTokens}`,
+        `Model: ${capture.model || "unknown"}`,
+        "",
+        "Context Skeleton to analyze:",
+        skeletonJson,
+      ].join("\n");
+
+      const response = await completeChat({
+        baseUrl: META_HELPER_BASE,
+        apiKey: apiKey!,
+        model: this.helperModel,
+        messages: [
+          { role: "system", content: TELEMETRY_SYSTEM },
+          { role: "user", content: userContent },
+        ],
+      });
+
+      if (run !== this.helperRun) {
+        return null;
+      }
+
+      const parsed = parseTelemetryResponse(response.content ?? "");
+      const telemetry = applyTelemetryResponse(capture.id, sections, parsed);
+
+      capture.telemetry = telemetry;
+      this.live.set(capture.id, capture);
+      if (this.selectedId === capture.id) {
+        this.selected = capture;
+      }
+      if (this.compareId === capture.id) {
+        this.compare = capture;
+      }
+      await this.enqueue(capture.id, async () => {
+        this.summaries = await this.store.update(capture);
+      });
+
+      const topCategory = telemetry.composition[0]?.categoryLabel ?? "Context";
+      const topPct = telemetry.composition[0]?.percentage ?? 100;
+      const finishText = `🤖 Meta AI Telemetry: Analyzed ${sections.length} prompt sections, identified ${topPct}% ${topCategory}`;
+      this.helperStatus = finishText;
+      this.lastEvent = finishText;
+      this.recordActivity({
+        kind: "finish",
+        text: finishText,
+        detail: telemetry.composition.map((c) => `${c.categoryLabel}: ${c.tokens}t (${c.percentage}%)`).join("\n"),
+      });
+      this.push();
+      return telemetry;
+    } catch (error) {
+      if (run !== this.helperRun) {
+        return null;
+      }
+      const fallback = buildDeterministicTelemetry(capture.id, capture.messages);
+      capture.telemetry = fallback;
+      this.live.set(capture.id, capture);
+      if (this.selectedId === capture.id) {
+        this.selected = capture;
+      }
+      if (this.compareId === capture.id) {
+        this.compare = capture;
+      }
+      await this.enqueue(capture.id, async () => {
+        this.summaries = await this.store.update(capture);
+      });
+
+      const errMsg = error instanceof Error ? error.message : "Telemetry analysis failed.";
+      this.helperStatus = `Telemetry fallback applied: ${errMsg}`;
+      this.lastEvent = this.helperStatus;
+      this.recordActivity({
+        kind: "status",
+        text: `⚠️ Telemetry fallback applied: ${errMsg}`,
+      });
+      this.push();
+      return fallback;
     } finally {
       if (run === this.helperRun) {
         this.helperBusy = false;
@@ -1087,6 +1298,40 @@ export class TrackerApp {
     this.push();
   }
 
+  private applyCachedAttributions(capture: StoredCapture): boolean {
+    if (!this.projectAttributions.length || !capture.messages) {
+      return false;
+    }
+    let changed = false;
+    capture.reported = capture.reported ?? [];
+    capture.messages.forEach((msg, idx) => {
+      if (msg.role === "assistant") {
+        return;
+      }
+      const alreadyAttributed = capture.reported.some(
+        (s) => s.messageIndex === idx && s.source === "attributed",
+      );
+      if (alreadyAttributed) {
+        return;
+      }
+      const match = matchCachedAttribution(msg.content, this.projectAttributions);
+      if (match) {
+        capture.reported.push({
+          messageIndex: idx,
+          file: match.file,
+          startLine: match.startLine,
+          endLine: match.endLine,
+          source: "attributed",
+          confidence: match.confidence,
+          explanation: match.explanation,
+          quote: match.cleanQuote || match.quote,
+        });
+        changed = true;
+      }
+    });
+    return changed;
+  }
+
   private async accept(incoming: RecorderCapture): Promise<void> {
     if (!this.project) {
       return;
@@ -1110,6 +1355,7 @@ export class TrackerApp {
       reply: incoming.reply,
       reported: pending,
     };
+    this.applyCachedAttributions(capture);
     this.live.set(capture.id, capture);
     this.watchdog.recordRequest();
     if (incoming.clientRequestId) {
@@ -1155,10 +1401,10 @@ export class TrackerApp {
     this.push();
   }
 
-  private enqueue(id: string, work: () => Promise<void>): Promise<void> {
+  private enqueue<T = void>(id: string, work: () => Promise<T>): Promise<T> {
     const previous = this.writes.get(id) ?? Promise.resolve();
     const next = previous.then(work, work);
-    this.writes.set(id, next);
+    this.writes.set(id, next.then(() => {}, () => {}));
     return next;
   }
 
@@ -1167,7 +1413,17 @@ export class TrackerApp {
       return;
     }
     this.selectedId = id;
-    this.selected = this.live.get(id) ?? (await this.store.get(this.project.path, id));
+    const capture = this.live.get(id) ?? (await this.store.get(this.project.path, id));
+    if (capture) {
+      const added = this.applyCachedAttributions(capture);
+      this.live.set(id, capture);
+      if (added) {
+        await this.enqueue(capture.id, async () => {
+          this.summaries = await this.store.update(capture);
+        });
+      }
+    }
+    this.selected = capture;
     if (this.compareId === id) {
       this.compareId = null;
       this.compare = null;
@@ -1189,6 +1445,8 @@ export class TrackerApp {
     if (!capture || capture.id === this.selectedId) {
       return;
     }
+    this.applyCachedAttributions(capture);
+    this.live.set(id, capture);
     this.compare = capture;
     this.compareId = capture.id;
     this.push();
@@ -1240,7 +1498,7 @@ export class TrackerApp {
     const view = deriveCapture(stored, this.index);
     for (const message of view.messages) {
       const span = message.spans.find((item) => item.id === spanId);
-      if (span?.canOpen && span.absolutePath && span.startLine && span.endLine && isInside(this.project.path, span.absolutePath)) {
+      if (span?.canOpen && span.absolutePath && span.startLine && span.endLine && (isInside(this.project.path, span.absolutePath) || isHomeConfigPath(span.absolutePath))) {
         await this.showFile(span.absolutePath, span.startLine, span.endLine);
         return;
       }
@@ -1557,6 +1815,9 @@ function helperStepLabel(name: string): string {
   }
   if (name === "attribute_prompt") {
     return "The AI helper is attributing prompt text to project source code.";
+  }
+  if (name === "analyze_telemetry") {
+    return "The AI helper is analyzing prompt context anatomy and token budget.";
   }
   return "The AI helper is connecting this project to capture.";
 }

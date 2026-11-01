@@ -1,13 +1,13 @@
 {
-  "plan_path": "docs/plans/semantic-attribution.md",
+  "plan_path": "docs/plans/context-telemetry.md",
   "status": "complete",
   "current_phase": 5,
   "total_phases": 5,
   "phase_labels": [
-    "Phase 1: Template Asset Scope & Indexer Expansion",
-    "Phase 2: Autonomous Semantic Attribution Prompting & Tools",
-    "Phase 3: Extension Pipeline & Span Integration",
-    "Phase 4: UI Actions & Interactive Attribution Badges",
-    "Phase 5: Dynamic Prompt Test Fixtures & Video Script Update"
+    "Phase 1: Context Decomposition, Triage & Caching Engine",
+    "Phase 2: Meta AI Telemetry System Prompting & Client Integration",
+    "Phase 3: Extension Pipeline, Data Persistence & Bridge to Loop 4",
+    "Phase 4: Webview UI Rendering (Composition Bar & Anatomy Badges)",
+    "Phase 5: RAG & Multi-Turn Test Fixtures & Video Script Documentation"
   ]
 }

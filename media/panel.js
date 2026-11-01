@@ -403,6 +403,7 @@ let detailScrollTop = 0;
       h("p", { class: "quiet" },
         "About " + capture.estimatedTokens.toLocaleString("en-US") + " tokens in the prompt · " +
         (capture.fileSpanCount > 0 ? (capture.fileSpanCount + " sections matched to project files") : "No matching source files")),
+      renderTelemetryBar(capture),
       bar(capture, spans),
       ...capture.messages.map((message, idx) => renderMessage(capture, message, idx)),
       h("section", { class: "reply" },
@@ -578,6 +579,17 @@ let detailScrollTop = 0;
       }, "✨ Attribute prompt"));
     }
 
+    if (hasSelectedCapture && state.selected) {
+      chips.push(h("button", {
+        class: "chip-btn" + (state.selected.telemetry ? "" : " chip-highlight"),
+        disabled: busy,
+        onClick: () => {
+          post({ type: "analyzeTelemetry", captureId: state.selected.id });
+        },
+        title: "Analyze prompt context window anatomy, purpose (what and why), and token budget with Meta AI",
+      }, "📊 Context telemetry"));
+    }
+
     return h("div", { class: "helper-chips" }, ...chips);
   }
 
@@ -649,11 +661,12 @@ let detailScrollTop = 0;
     const hasFileSpan = message.spans.some((s) => s.kind === "file");
     const isAttributing = attributingMessage === (capture.id + ":" + messageIndex);
     const canAttribute = !hasFileSpan && message.role !== "assistant" && message.spans.length > 0;
+    const telemetry = message.telemetry;
 
-    return h("section", { class: "message" },
+    return h("section", { class: "message", id: "message-" + capture.id + "-" + messageIndex },
       h("div", { class: "spread" },
         h("h2", null, message.roleLabel),
-        canAttribute
+        canAttribute && !telemetry
           ? h("button", {
               class: "ghost attribution-btn",
               disabled: isAttributing || (state.helper && state.helper.busy),
@@ -661,14 +674,140 @@ let detailScrollTop = 0;
               title: "Use Meta AI to search the project and attribute this prompt to a template or source file",
             }, isAttributing ? "Attributing…" : "✨ Attribute with Meta AI")
           : null),
+      telemetry ? renderAnatomyCard(capture, message, messageIndex, telemetry) : null,
       message.truncated ? h("p", { class: "quiet" }, "This part was shortened for display. The model still received the full text.") : null,
       ...message.spans.map((span) => renderSpan(capture, span)));
   }
 
-  function attributeMessage(captureId, messageIndex) {
+  function renderAnatomyCard(capture, message, messageIndex, telemetry) {
+    const isAttributing = attributingMessage === (capture.id + ":" + messageIndex);
+    const canTrace = message.role !== "assistant" && !message.spans.some((s) => s.kind === "file");
+    const catClass = "cat-" + telemetry.category;
+
+    return h("div", { class: "anatomy-card" },
+      h("div", { class: "anatomy-card-header" },
+        h("div", { class: "row", style: "gap:6px;align-items:center;" },
+          h("span", { class: "badge-category " + catClass },
+            categoryIcon(telemetry.category) + " " + telemetry.categoryLabel),
+          h("span", { class: "anatomy-meta" },
+            telemetry.tokenEstimate.toLocaleString("en-US") + " tokens · " + telemetry.tokenPercentage + "% of context")),
+        canTrace
+          ? h("button", {
+              class: "ghost attribution-btn",
+              disabled: isAttributing || (state.helper && state.helper.busy),
+              onClick: () => attributeMessage(capture.id, messageIndex),
+              title: "Attribute this " + telemetry.categoryLabel + " block to source template using Meta AI",
+            }, isAttributing ? "Tracing…" : "✨ Trace in Code")
+          : null),
+      h("div", { class: "anatomy-body" },
+        h("div", { class: "anatomy-what" },
+          h("span", { class: "anatomy-prefix" }, "🎯 WHAT:"),
+          h("span", null, telemetry.what)),
+        h("div", { class: "anatomy-why" },
+          h("span", { class: "anatomy-prefix" }, "💡 WHY:"),
+          h("span", null, telemetry.why))),
+      telemetry.warning
+        ? h("div", { class: "anatomy-warning-pill" }, "⚠️ " + telemetry.warning)
+        : null);
+  }
+
+  function renderTelemetryBar(capture) {
+    const telemetry = capture.telemetry;
+    const isBusy = Boolean(state.helper && state.helper.busy);
+
+    if (!telemetry) {
+      return h("div", { class: "telemetry-container telemetry-prompt-banner" },
+        h("div", { class: "spread" },
+          h("div", { class: "row", style: "gap:6px;align-items:center;" },
+            h("span", { style: "font-size:14px;" }, "📊"),
+            h("strong", { class: "telemetry-title" }, "Context Window Anatomy & Telemetry")),
+          h("button", {
+            class: "secondary",
+            style: "font-size:11.5px;padding:3px 10px;",
+            disabled: isBusy,
+            onClick: () => post({ type: "analyzeTelemetry", captureId: capture.id }),
+            title: "Profile prompt architecture, RAG grounding, chat history share, and token budget with Meta AI",
+          }, isBusy ? "Analyzing…" : "⚡ Analyze Anatomy with Meta AI")),
+        h("p", { class: "quiet", style: "font-size:11.5px;" },
+          "Discover prompt composition, RAG context shares, token budget allocation, and context bloat issues."));
+    }
+
+    const sections = telemetry.sections || [];
+    const composition = telemetry.composition || [];
+    const warnings = telemetry.warnings || [];
+
+    return h("div", { class: "telemetry-container", id: "telemetry-container" },
+      h("div", { class: "telemetry-header" },
+        h("div", { class: "row", style: "gap:6px;align-items:center;" },
+          h("span", { style: "font-size:14px;" }, "📊"),
+          h("h3", { class: "telemetry-title" }, "Context Anatomy & Token Budget"),
+          h("span", { class: "helper-badge finish-badge", style: "font-size:10px;padding:1px 5px;" }, "⚡ Meta AI")),
+        h("div", { class: "row", style: "gap:6px;" },
+          h("button", {
+            class: "ghost icon-btn",
+            style: "font-size:11px;",
+            disabled: isBusy,
+            onClick: () => post({ type: "analyzeTelemetry", captureId: capture.id }),
+            title: "Re-run Meta AI architectural decomposition and telemetry on this capture",
+          }, isBusy ? "Analyzing…" : "⚡ Re-analyze"))),
+      h("div", { class: "telemetry-bar", role: "group", "aria-label": "Context Composition" },
+        ...sections.map((section) => {
+          const catClass = "cat-" + section.category;
+          const width = Math.max(1, section.tokenEstimate);
+          const title = section.categoryLabel + ": " + section.tokenEstimate.toLocaleString("en-US") + " tokens (" + section.tokenPercentage + "%)\n" + section.what + "\n" + section.why;
+          return h("button", {
+            class: "telemetry-segment " + catClass,
+            style: "flex:" + width + " 1 0",
+            title: title,
+            onClick: () => scrollToMessage(capture.id, section.messageIndex),
+          });
+        })),
+      h("div", { class: "telemetry-legend" },
+        ...composition.map((item) => {
+          const catClass = "cat-" + item.category;
+          return h("div", {
+            class: "telemetry-legend-item",
+            title: "Click to jump to " + item.categoryLabel,
+            onClick: () => {
+              const match = sections.find((s) => s.category === item.category);
+              if (match) scrollToMessage(capture.id, match.messageIndex);
+            },
+          },
+            h("span", { class: "swatch " + catClass, style: "border-radius:2px;" }),
+            h("span", { style: "font-weight:600;" }, item.categoryLabel + ":"),
+            h("span", { class: "quiet" }, item.tokens.toLocaleString("en-US") + "t (" + item.percentage + "%)"));
+        })),
+      warnings.length > 0
+        ? h("div", { class: "stack", style: "gap:4px;" },
+            ...warnings.map((w) => h("div", { class: "telemetry-advisory" },
+              h("span", null, "⚠️"),
+              h("span", null, w))))
+        : null);
+  }
+
+  function categoryIcon(category) {
+    switch (category) {
+      case "system_instruction": return "🟢";
+      case "rag_grounding": return "🟣";
+      case "chat_history": return "🟡";
+      case "few_shot_exemplar": return "⭐";
+      case "schema_tool_spec": return "🔧";
+      case "user_query": return "🔵";
+      default: return "📄";
+    }
+  }
+
+  function scrollToMessage(captureId, messageIndex) {
+    const el = document.getElementById("message-" + captureId + "-" + messageIndex);
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }
+
+  function attributeMessage(captureId, messageIndex, content) {
     attributingMessage = captureId + ":" + messageIndex;
     render();
-    post({ type: "attributeMessage", captureId: captureId, messageIndex: messageIndex });
+    post({ type: "attributeMessage", captureId: captureId, messageIndex: messageIndex, content: content });
   }
 
   function renderSpan(capture, span) {

@@ -12,8 +12,9 @@ const ROLE_LABELS: Record<string, string> = {
 };
 
 export function deriveCapture(capture: StoredCapture, index: ProjectIndex | null): CaptureView {
+  const telemetry = capture.telemetry;
   const messages: ViewMessage[] = capture.messages.map((message, messageIndex) => {
-    const reported = capture.reported.filter((span) => {
+    const reported = (capture.reported ?? []).filter((span) => {
       if (span.messageIndex === undefined) {
         return Boolean(span.quote) || messageIndex === 0;
       }
@@ -23,11 +24,15 @@ export function deriveCapture(capture: StoredCapture, index: ProjectIndex | null
       ...span,
       id: `${messageIndex}-${spanIndex}`,
     }));
+    const messageTelemetry = telemetry?.sections.find(
+      (sec) => sec.messageIndex === messageIndex || sec.messageIndices?.includes(messageIndex),
+    );
     return {
       role: message.role,
       roleLabel: ROLE_LABELS[message.role] ?? message.role,
       truncated: message.truncated,
       spans,
+      telemetry: messageTelemetry,
     };
   });
   const reply = readableReply(capture.reply);
@@ -50,12 +55,14 @@ export function deriveCapture(capture: StoredCapture, index: ProjectIndex | null
     messages,
     reply,
     fileSpanCount,
+    telemetry,
   };
 }
 
 export function presentCapture(capture: CaptureView): CaptureView {
   return {
     ...capture,
+    telemetry: capture.telemetry,
     messages: capture.messages.map((message) => ({
       ...message,
       spans: message.spans.map((span) => {

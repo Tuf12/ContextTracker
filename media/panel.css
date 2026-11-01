@@ -948,3 +948,226 @@ body[data-surface="editor"] .helper-feed {
   background: color-mix(in srgb, var(--vscode-foreground, #d4d4d4) 3%, var(--vscode-editor-background, #1e1e1e));
 }
 
+/* Context Window Anatomy & Telemetry (Loop 6) */
+.telemetry-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--vscode-foreground, #d4d4d4) 4%, var(--vscode-editor-background, #1e1e1e));
+  border: 1px solid color-mix(in srgb, var(--vscode-foreground, #d4d4d4) 14%, transparent);
+}
+
+.telemetry-prompt-banner {
+  background: color-mix(in srgb, var(--vscode-charts-purple, #b180d7) 6%, var(--vscode-editor-background, #1e1e1e));
+  border-color: color-mix(in srgb, var(--vscode-charts-purple, #b180d7) 24%, transparent);
+}
+
+.telemetry-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.telemetry-title {
+  font-size: 12px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+}
+
+.telemetry-bar {
+  display: flex;
+  width: 100%;
+  height: 16px;
+  border-radius: 3px;
+  overflow: hidden;
+  gap: 2px;
+  background: var(--vscode-editor-background);
+}
+
+.telemetry-segment {
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  min-width: 4px;
+  height: 100%;
+  transition: opacity 0.15s ease;
+}
+
+.telemetry-segment:hover {
+  outline: 1px solid var(--vscode-foreground, #d4d4d4);
+  outline-offset: 1px;
+  opacity: 0.9;
+}
+
+.telemetry-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  font-size: 11.5px;
+}
+
+.telemetry-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+
+.telemetry-legend-item:hover {
+  background: color-mix(in srgb, var(--vscode-foreground, #d4d4d4) 10%, transparent);
+}
+
+.telemetry-advisory {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 11.5px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  background: color-mix(in srgb, #f59e0b 14%, var(--vscode-editor-background, #1e1e1e));
+  border: 1px solid color-mix(in srgb, #f59e0b 35%, transparent);
+  color: #fbbf24;
+}
+
+/* Category Color Swatches & Segments */
+.cat-system_instruction {
+  background: var(--vscode-charts-green, #4ade80);
+}
+.cat-rag_grounding {
+  background: var(--vscode-charts-purple, #b180d7);
+}
+.cat-chat_history {
+  background: var(--vscode-charts-orange, #fb923c);
+}
+.cat-few_shot_exemplar {
+  background: var(--vscode-charts-yellow, #facc15);
+}
+.cat-schema_tool_spec {
+  background: var(--vscode-charts-blue, #38bdf8);
+}
+.cat-user_query {
+  background: var(--vscode-charts-lines, #60a5fa);
+}
+.cat-runtime_data {
+  background: var(--vscode-descriptionForeground, #94a3b8);
+}
+
+/* Category Badges */
+.badge-category {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 4px;
+}
+.badge-category.cat-system_instruction {
+  background: color-mix(in srgb, #4ade80 20%, transparent);
+  color: #4ade80;
+  border: 1px solid color-mix(in srgb, #4ade80 35%, transparent);
+}
+.badge-category.cat-rag_grounding {
+  background: color-mix(in srgb, #b180d7 20%, transparent);
+  color: #c084fc;
+  border: 1px solid color-mix(in srgb, #b180d7 35%, transparent);
+}
+.badge-category.cat-chat_history {
+  background: color-mix(in srgb, #fb923c 20%, transparent);
+  color: #fb923c;
+  border: 1px solid color-mix(in srgb, #fb923c 35%, transparent);
+}
+.badge-category.cat-few_shot_exemplar {
+  background: color-mix(in srgb, #facc15 20%, transparent);
+  color: #facc15;
+  border: 1px solid color-mix(in srgb, #facc15 35%, transparent);
+}
+.badge-category.cat-schema_tool_spec {
+  background: color-mix(in srgb, #38bdf8 20%, transparent);
+  color: #38bdf8;
+  border: 1px solid color-mix(in srgb, #38bdf8 35%, transparent);
+}
+.badge-category.cat-user_query {
+  background: color-mix(in srgb, #60a5fa 20%, transparent);
+  color: #60a5fa;
+  border: 1px solid color-mix(in srgb, #60a5fa 35%, transparent);
+}
+.badge-category.cat-runtime_data {
+  background: color-mix(in srgb, var(--vscode-descriptionForeground, #94a3b8) 20%, transparent);
+  color: var(--vscode-descriptionForeground, #94a3b8);
+  border: 1px solid color-mix(in srgb, var(--vscode-descriptionForeground, #94a3b8) 35%, transparent);
+}
+
+/* Section Anatomy Cards */
+.anatomy-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--vscode-foreground, #d4d4d4) 3%, var(--vscode-editor-background, #1e1e1e));
+  border: 1px solid color-mix(in srgb, var(--vscode-foreground, #d4d4d4) 12%, transparent);
+  margin-bottom: 6px;
+}
+
+.anatomy-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.anatomy-meta {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.anatomy-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.anatomy-what {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--vscode-foreground);
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.anatomy-why {
+  font-size: 11.5px;
+  color: var(--vscode-descriptionForeground);
+  line-height: 1.4;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.anatomy-prefix {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  opacity: 0.85;
+}
+
+.anatomy-warning-pill {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: color-mix(in srgb, #f59e0b 14%, var(--vscode-editor-background, #1e1e1e));
+  color: #fbbf24;
+  border: 1px solid color-mix(in srgb, #f59e0b 35%, transparent);
+}
+
+

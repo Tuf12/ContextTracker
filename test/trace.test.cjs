@@ -9,8 +9,8 @@ const { extractReply, looksLikeGeneration, normalizeRequest } = require("../out/
 const { applyEnv, readEnvStatus, restoreEnv, rewriteEnv } = require("../out/env.js");
 const { chooseUpstream, providerFor, upstreamUrl } = require("../out/recorder.js");
 const { armRedirect, chooseEndpoint, findEndpoints, planRewrite, restoreAllRedirects } = require("../out/redirect.js");
-const { CaptureStore } = require("../out/store.js");
-const { deriveCapture } = require("../out/derive.js");
+const { CaptureStore, extractCleanQuote, matchCachedAttribution, hashPromptText } = require("../out/store.js");
+const { deriveCapture, presentCapture } = require("../out/derive.js");
 
 const REFUND = [
   "def refund(order, reason):",
@@ -365,4 +365,182 @@ test("CaptureStore persists attributed spans across store reloads", async () => 
   assert.equal(view.messages[0].spans[0].source, "attributed");
   assert.match(view.messages[0].spans[0].label, /Attributed by Meta AI/);
 });
+
+test("CaptureStore persists telemetry and deriveCapture binds section telemetry to view messages", async () => {
+  const storeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ct-store-telemetry-"));
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ct-project-telemetry-"));
+  const store = new CaptureStore(storeRoot);
+  await store.init();
+
+  const capture = {
+    id: "test-telemetry-cap-1",
+    clientRequestId: "req-telemetry",
+    projectPath: projectRoot,
+    createdAt: new Date().toISOString(),
+    provider: "openai",
+    upstream: "https://api.openai.com",
+    endpoint: "/v1/chat/completions",
+    model: "llama-3-8b",
+    status: 200,
+    error: null,
+    messages: [
+      { role: "system", content: "You are a customer service assistant.", truncated: false },
+      { role: "user", content: "Reference Documents:\nDoc 1: Return window is 30 days.\n\nQuestion: Can I return item?", truncated: false },
+    ],
+    reply: "Yes, you can return items within 30 days.",
+    reported: [],
+    telemetry: {
+      captureId: "test-telemetry-cap-1",
+      analyzedAt: new Date().toISOString(),
+      totalTokens: 120,
+      composition: [
+        {
+          category: "rag_grounding",
+          categoryLabel: "RAG Grounding",
+          tokens: 80,
+          percentage: 67,
+          colorVar: "var(--vscode-charts-purple)",
+        },
+        {
+          category: "system_instruction",
+          categoryLabel: "System Instruction",
+          tokens: 40,
+          percentage: 33,
+          colorVar: "var(--vscode-charts-green)",
+        },
+      ],
+      sections: [
+        {
+          sectionId: "msg-0",
+          messageIndex: 0,
+          messageIndices: [0],
+          category: "system_instruction",
+          categoryLabel: "System Instruction",
+          what: "Customer Support Persona",
+          why: "Defines agent tone and rules.",
+          tokenEstimate: 40,
+          tokenPercentage: 33,
+        },
+        {
+          sectionId: "msg-1-rag",
+          messageIndex: 1,
+          messageIndices: [1],
+          category: "rag_grounding",
+          categoryLabel: "RAG Grounding",
+          what: "Policy Return Documentation",
+          why: "Grounds return policy limits.",
+          tokenEstimate: 80,
+          tokenPercentage: 67,
+          warning: "High token share",
+        },
+      ],
+      warnings: ["High token share"],
+    },
+  };
+
+  await store.add(capture);
+
+  // Reload from fresh store instance
+  const freshStore = new CaptureStore(storeRoot);
+  await freshStore.init();
+  const loaded = await freshStore.get(projectRoot, "test-telemetry-cap-1");
+
+  assert.ok(loaded);
+  assert.ok(loaded.telemetry);
+  assert.equal(loaded.telemetry.totalTokens, 120);
+  assert.equal(loaded.telemetry.sections.length, 2);
+  assert.equal(loaded.telemetry.sections[0].what, "Customer Support Persona");
+  assert.equal(loaded.telemetry.sections[1].what, "Policy Return Documentation");
+  assert.equal(loaded.telemetry.composition.length, 2);
+  assert.deepEqual(loaded.telemetry.warnings, ["High token share"]);
+
+  // Verify deriveCapture maps telemetry to capture view and message items
+  const view = deriveCapture(loaded, null);
+  assert.ok(view.telemetry);
+  assert.equal(view.telemetry.totalTokens, 120);
+  assert.equal(view.messages[0].telemetry?.what, "Customer Support Persona");
+  assert.equal(view.messages[0].telemetry?.category, "system_instruction");
+  assert.equal(view.messages[1].telemetry?.what, "Policy Return Documentation");
+  assert.equal(view.messages[1].telemetry?.category, "rag_grounding");
+
+  // Verify presentCapture retains telemetry
+  const presented = presentCapture(view);
+  assert.ok(presented.telemetry);
+  assert.equal(presented.telemetry.sections[0].why, "Defines agent tone and rules.");
+});
+
+test("CaptureStore manages persistent project attributions across captures and reloads", async () => {
+  const storeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ct-store-attr-cache-"));
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ct-project-attr-cache-"));
+  const store = new CaptureStore(storeRoot);
+  await store.init();
+
+  const promptText = "You are Eidos. You live in this thread. Skills are Host commands.";
+  const rawQuote = "'You are Eidos. You live in this thread.',\n    'Skills are Host commands.',";
+  const cleanQuote = extractCleanQuote(rawQuote);
+  assert.equal(cleanQuote, "You are Eidos. You live in this thread.");
+
+  const attr = {
+    fingerprint: hashPromptText(promptText),
+    quote: rawQuote,
+    cleanQuote,
+    file: "desktop/src/core/domain/eidos.ts",
+    startLine: 239,
+    endLine: 262,
+    confidence: 0.98,
+    explanation: "Matches Eidos system prompt builder",
+    attributedAt: new Date().toISOString(),
+  };
+
+  await store.saveAttribution(projectRoot, attr);
+  const listed = await store.listAttributions(projectRoot);
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].file, "desktop/src/core/domain/eidos.ts");
+
+  // Verify matching logic for verbatim content
+  const match1 = matchCachedAttribution(promptText, listed);
+  assert.ok(match1);
+  assert.equal(match1.file, "desktop/src/core/domain/eidos.ts");
+
+  // Verify matching logic for dynamic content containing invariant quote
+  const dynamicPrompt = `${promptText}\nAPP DATA: AAPL=150, TSLA=200\nUser query here`;
+  const match2 = matchCachedAttribution(dynamicPrompt, listed);
+  assert.ok(match2);
+  assert.equal(match2.file, "desktop/src/core/domain/eidos.ts");
+
+  // Verify seedAttributionsFromCaptures scans existing capture files
+  const captureWithAttr = {
+    id: "cap-seeded-1",
+    clientRequestId: null,
+    projectPath: projectRoot,
+    createdAt: new Date().toISOString(),
+    provider: "custom",
+    upstream: "http://127.0.0.1:11434",
+    endpoint: "/api/chat",
+    model: "gemma4:12b",
+    status: 200,
+    error: null,
+    messages: [{ role: "system", content: "System instructions for seeded bot." }],
+    reply: "OK",
+    reported: [
+      {
+        messageIndex: 0,
+        file: "src/bot.ts",
+        startLine: 10,
+        endLine: 20,
+        source: "attributed",
+        confidence: 0.95,
+        explanation: "Seeded bot prompt",
+        quote: "System instructions for seeded bot.",
+      },
+    ],
+  };
+  await store.add(captureWithAttr);
+
+  const seeded = await store.seedAttributionsFromCaptures(projectRoot);
+  assert.equal(seeded.some((a) => a.file === "src/bot.ts"), true);
+  assert.equal(seeded.some((a) => a.file === "desktop/src/core/domain/eidos.ts"), true);
+});
+
+
 

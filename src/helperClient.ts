@@ -113,22 +113,25 @@ export async function completeChat(options: {
   apiKey: string;
   model: string;
   messages: ChatMessage[];
-  tools: OpenAITool[];
+  tools?: OpenAITool[];
   fetchImpl?: HelperFetch;
 }): Promise<ChatTurn> {
   const fetchImpl = options.fetchImpl ?? defaultFetch();
+  const requestBody: Record<string, unknown> = {
+    model: options.model,
+    messages: options.messages,
+  };
+  if (options.tools && options.tools.length > 0) {
+    requestBody.tools = options.tools;
+    requestBody.tool_choice = "auto";
+  }
   const response = await fetchImpl(helperChatUrl(options.baseUrl), {
     method: "POST",
     headers: {
       "content-type": "application/json",
       authorization: `Bearer ${options.apiKey}`,
     },
-    body: JSON.stringify({
-      model: options.model,
-      messages: options.messages,
-      tools: options.tools,
-      tool_choice: "auto",
-    }),
+    body: JSON.stringify(requestBody),
   });
   const raw = await response.text();
   if (!response.ok) {
