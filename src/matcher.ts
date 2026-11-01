@@ -14,6 +14,8 @@ type FileSpan = {
   startLine: number;
   endLine: number;
   source: SpanSource;
+  confidence?: number;
+  explanation?: string;
 };
 
 const SINGLE_LINE_MIN = 48;
@@ -83,9 +85,17 @@ function placeOne(
   } else if (isFiniteNumber(item.charStart) && isFiniteNumber(item.charEnd)) {
     charStart = clamp(item.charStart, 0, content.length);
     charEnd = clamp(item.charEnd, 0, content.length);
+  } else if (item.source === "attributed") {
+    charStart = 0;
+    charEnd = content.length;
   }
   if (charStart === null || charEnd === null || charEnd <= charStart) {
-    return null;
+    if (item.source === "attributed" && content.trim().length > 0) {
+      charStart = 0;
+      charEnd = content.length;
+    } else {
+      return null;
+    }
   }
   return {
     charStart,
@@ -94,7 +104,9 @@ function placeOne(
     absolutePath: absolute ?? undefined,
     startLine,
     endLine,
-    source: "reported",
+    source: item.source ?? "reported",
+    confidence: item.confidence,
+    explanation: item.explanation,
   };
 }
 
@@ -318,6 +330,8 @@ function toViewSpans(content: string, role: string, fileSpans: FileSpan[], index
       canOpen,
       startLine: span.startLine,
       endLine: span.endLine,
+      confidence: span.confidence,
+      explanation: span.explanation,
     });
     count += 1;
     cursor = Math.max(cursor, span.charEnd);
@@ -333,7 +347,11 @@ function toViewSpans(content: string, role: string, fileSpans: FileSpan[], index
 
 function fileLabel(span: FileSpan): string {
   const lines = span.startLine === span.endLine ? `line ${span.startLine}` : `lines ${span.startLine}–${span.endLine}`;
-  const how = span.source === "reported" ? "Marked by your app" : "Matched in the project";
+  const how = span.source === "attributed"
+    ? "Attributed by Meta AI"
+    : span.source === "reported"
+      ? "Marked by your app"
+      : "Matched in the project";
   return `${span.file} · ${lines} · ${how}`;
 }
 

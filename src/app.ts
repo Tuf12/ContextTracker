@@ -5,7 +5,7 @@ import * as vscode from "vscode";
 import { deriveCapture, presentCapture } from "./derive";
 import { ANTHROPIC_ENV, applyEnv, OPENAI_ENV, proposedBases, readEnvStatus, restoreEnv } from "./env";
 import { completeChat, listHelperModels, META_HELPER_BASE, META_MODELS } from "./helperClient";
-import { ADDRESS_SYSTEM, addressTools, buildDiagnosticUserPrompt, buildHelperUserPrompt } from "./helperTools";
+import { ADDRESS_SYSTEM, addressTools, ATTRIBUTION_SYSTEM, attributionTools, buildAttributionUserPrompt, buildDiagnosticUserPrompt, buildHelperUserPrompt } from "./helperTools";
 import { runHarness } from "./harness";
 import { panelHtml } from "./html";
 import { indexProject } from "./indexer";
@@ -13,7 +13,7 @@ import { isInside, projectKey, resolveAddressFile, resolveProjectFile } from "./
 import { CAPTURE_PORT, chooseUpstream, startRecorder, type RecorderCapture, type RecorderServer } from "./recorder";
 import { armRedirect, chooseEndpoint, endpointLabel, findEndpoints, planRewrite, restoreAllRedirects, type FoundEndpoint } from "./redirect";
 import { CaptureStore } from "./store";
-import type { AddressOffer, ProjectIndex, ProjectView, ReportedSpan, RouteSettings, StoredCapture, ViewState } from "./types";
+import type { AddressOffer, AttributedSpan, HelperActivityItem, HelperActivityKind, ProjectIndex, ProjectView, ReportedSpan, RouteSettings, StoredCapture, ViewState } from "./types";
 import { TrafficWatchdog } from "./watchdog";
 
 const PROJECT_KEY = "contextTracker.projectPath";
@@ -60,8 +60,30 @@ export class TrackerApp {
   private helperStatus: string | null = null;
   private addressOffer: AddressOffer | null = null;
   private helperRun = 0;
+  private helperActivity: HelperActivityItem[] = [];
   private panel: vscode.WebviewPanel | undefined;
   private statusTimer: ReturnType<typeof setTimeout> | undefined;
+
+  private recordActivity(item: {
+    kind: HelperActivityKind;
+    text: string;
+    toolName?: string;
+    detail?: string;
+  }): void {
+    const entry: HelperActivityItem = {
+      id: `act-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      timestamp: Date.now(),
+      kind: item.kind,
+      text: item.text,
+      toolName: item.toolName,
+      detail: item.detail,
+    };
+    this.helperActivity.push(entry);
+    if (this.helperActivity.length > 100) {
+      this.helperActivity.splice(0, this.helperActivity.length - 100);
+    }
+    this.push();
+  }
 
   constructor(private readonly context: vscode.ExtensionContext) {
     this.output = vscode.window.createOutputChannel("Context Tracker");
@@ -213,6 +235,11 @@ export class TrackerApp {
           await this.openSpan(body.captureId, body.spanId);
         }
         return;
+      case "attributeMessage":
+        if (typeof body.captureId === "string" && typeof body.messageIndex === "number") {
+          await this.attributeCaptureMessage(body.captureId, body.messageIndex);
+        }
+        return;
       case "openClue":
         if (typeof body.file === "string" && typeof body.line === "number") {
           await this.openClue(body.file, body.line);
@@ -234,6 +261,13 @@ export class TrackerApp {
         return;
       case "openBeside":
         this.openBeside();
+        return;
+      case "helperMessage":
+        await this.handleHelperMessage(typeof body.text === "string" ? body.text : "");
+        return;
+      case "clearHelperActivity":
+        this.helperActivity = [];
+        this.push();
         return;
       case "reindex":
         if (this.project) {
@@ -462,6 +496,11 @@ export class TrackerApp {
     this.status.text = "$(loading~spin) AI helper is searching";
     this.status.tooltip = searching;
     this.status.show();
+    this.recordActivity({
+      kind: "status",
+      text: "Starting autonomous search for model address with Meta AI...",
+      detail: `Model: ${this.helperModel}`,
+    });
     this.push();
     try {
       const userPrompt = buildHelperUserPrompt(this.project.clues || [], {
@@ -489,6 +528,28 @@ export class TrackerApp {
           this.lastEvent = step;
           this.push();
         },
+        onEvent: (event) => {
+          if (run !== this.helperRun) {
+            return;
+          }
+          if (event.kind === "thought") {
+            this.recordActivity({ kind: "thought", text: event.text });
+          } else if (event.kind === "tool_call") {
+            this.recordActivity({
+              kind: "tool_call",
+              toolName: event.toolName,
+              text: formatToolCall(event.toolName, event.args),
+              detail: typeof event.args === "object" ? JSON.stringify(event.args, null, 2) : String(event.args),
+            });
+          } else if (event.kind === "tool_result") {
+            this.recordActivity({
+              kind: "tool_result",
+              toolName: event.toolName,
+              text: summarizeToolResult(event.toolName, event.content),
+              detail: event.content,
+            });
+          }
+        },
       });
       if (run !== this.helperRun) {
         return;
@@ -496,10 +557,19 @@ export class TrackerApp {
       if (!result.finish) {
         this.helperStatus = `The AI helper reached the search limit (${result.steps} steps) without an address. Click Start capture again to retry.`;
         this.lastEvent = this.helperStatus;
+        this.recordActivity({
+          kind: "status",
+          text: this.helperStatus,
+        });
       } else {
         this.addressOffer = result.finish;
         this.helperStatus = "The AI helper found a model address. Confirm it above to start capture.";
         this.lastEvent = this.helperStatus;
+        this.recordActivity({
+          kind: "finish",
+          text: `Found model address ${this.addressOffer.url} in ${this.addressOffer.relativeFile}:${this.addressOffer.line}`,
+          detail: this.addressOffer.reason,
+        });
       }
     } catch (error) {
       if (run !== this.helperRun) {
@@ -507,6 +577,10 @@ export class TrackerApp {
       }
       this.helperStatus = error instanceof Error ? error.message : "The helper model could not be reached.";
       this.lastEvent = this.helperStatus;
+      this.recordActivity({
+        kind: "status",
+        text: this.helperStatus,
+      });
     } finally {
       if (run === this.helperRun) {
         this.helperBusy = false;
@@ -583,6 +657,10 @@ export class TrackerApp {
     this.status.text = "$(loading~spin) AI helper diagnosing";
     this.status.tooltip = diagnosing;
     this.status.show();
+    this.recordActivity({
+      kind: "status",
+      text: diagnosing,
+    });
     this.push();
 
     try {
@@ -619,6 +697,28 @@ export class TrackerApp {
           this.lastEvent = step;
           this.push();
         },
+        onEvent: (event) => {
+          if (run !== this.helperRun) {
+            return;
+          }
+          if (event.kind === "thought") {
+            this.recordActivity({ kind: "thought", text: event.text });
+          } else if (event.kind === "tool_call") {
+            this.recordActivity({
+              kind: "tool_call",
+              toolName: event.toolName,
+              text: formatToolCall(event.toolName, event.args),
+              detail: typeof event.args === "object" ? JSON.stringify(event.args, null, 2) : String(event.args),
+            });
+          } else if (event.kind === "tool_result") {
+            this.recordActivity({
+              kind: "tool_result",
+              toolName: event.toolName,
+              text: summarizeToolResult(event.toolName, event.content),
+              detail: event.content,
+            });
+          }
+        },
       });
 
       if (run !== this.helperRun) {
@@ -628,6 +728,10 @@ export class TrackerApp {
       if (!result.finish) {
         this.helperStatus = "Diagnostic search completed without finding an alternative address. Check your app's configuration files.";
         this.lastEvent = this.helperStatus;
+        this.recordActivity({
+          kind: "status",
+          text: this.helperStatus,
+        });
         return null;
       }
 
@@ -639,6 +743,11 @@ export class TrackerApp {
       this.addressOffer = offer;
       this.helperStatus = offer.explanation ?? null;
       this.lastEvent = offer.explanation ?? null;
+      this.recordActivity({
+        kind: "finish",
+        text: `Diagnosed active runtime configuration in ${offer.relativeFile} line ${offer.line}`,
+        detail: offer.explanation,
+      });
       return offer;
     } catch (error) {
       if (run !== this.helperRun) {
@@ -646,6 +755,180 @@ export class TrackerApp {
       }
       this.helperStatus = error instanceof Error ? error.message : "Connection diagnostics failed.";
       this.lastEvent = this.helperStatus;
+      this.recordActivity({
+        kind: "status",
+        text: this.helperStatus,
+      });
+      return null;
+    } finally {
+      if (run === this.helperRun) {
+        this.helperBusy = false;
+        this.refreshStatus();
+        this.push();
+      }
+    }
+  }
+
+  public async attributeCaptureMessage(
+    captureId: string,
+    messageIndex: number,
+  ): Promise<AttributedSpan | null> {
+    if (!this.project) {
+      this.lastEvent = "Open a project first.";
+      this.push();
+      return null;
+    }
+    const capture = this.live.get(captureId) ?? (await this.store.get(this.project.path, captureId));
+    if (!capture || !capture.messages[messageIndex]) {
+      this.lastEvent = "Message was not found in capture.";
+      this.push();
+      return null;
+    }
+    const message = capture.messages[messageIndex];
+    if (!message.content.trim()) {
+      this.lastEvent = "Message has no content to attribute.";
+      this.push();
+      return null;
+    }
+
+    if (!this.helperKeySaved || !this.helperModel.trim()) {
+      this.helperConnectOpen = true;
+      this.helperStatus = "Connect an AI helper to attribute prompt templates to code.";
+      this.push();
+      return null;
+    }
+    const apiKey = await this.context.secrets.get(HELPER_SECRET);
+    if (!apiKey) {
+      this.helperKeySaved = false;
+      this.helperConnectOpen = true;
+      this.helperStatus = "API key was not found. Connect the AI helper again.";
+      this.push();
+      return null;
+    }
+
+    const run = ++this.helperRun;
+    const working = `The AI helper is attributing prompt message ${messageIndex + 1} to source code...`;
+    this.helperBusy = true;
+    this.helperStatus = working;
+    this.lastEvent = working;
+    this.status.text = "$(loading~spin) Attributing prompt";
+    this.status.tooltip = working;
+    this.status.show();
+    this.recordActivity({
+      kind: "status",
+      text: working,
+    });
+    this.push();
+
+    try {
+      const userPrompt = buildAttributionUserPrompt({
+        content: message.content,
+        role: message.role,
+        projectName: this.project.name,
+        model: capture.model,
+      });
+
+      const result = await runHarness({
+        system: ATTRIBUTION_SYSTEM,
+        user: userPrompt,
+        tools: attributionTools(this.project.path),
+        stepCap: 8,
+        complete: (messages, tools) =>
+          completeChat({
+            baseUrl: META_HELPER_BASE,
+            apiKey,
+            model: this.helperModel,
+            messages,
+            tools,
+          }),
+        onTool: (name) => {
+          if (run !== this.helperRun) {
+            return;
+          }
+          const step = helperStepLabel(name);
+          this.helperStatus = step;
+          this.lastEvent = step;
+          this.push();
+        },
+        onEvent: (event) => {
+          if (run !== this.helperRun) {
+            return;
+          }
+          if (event.kind === "thought") {
+            this.recordActivity({ kind: "thought", text: event.text });
+          } else if (event.kind === "tool_call") {
+            this.recordActivity({
+              kind: "tool_call",
+              toolName: event.toolName,
+              text: formatToolCall(event.toolName, event.args),
+              detail: typeof event.args === "object" ? JSON.stringify(event.args, null, 2) : String(event.args),
+            });
+          } else if (event.kind === "tool_result") {
+            this.recordActivity({
+              kind: "tool_result",
+              toolName: event.toolName,
+              text: summarizeToolResult(event.toolName, event.content),
+              detail: event.content,
+            });
+          }
+        },
+      });
+
+      if (run !== this.helperRun) {
+        return null;
+      }
+
+      if (!result.finish) {
+        this.helperStatus = "The AI helper completed search without identifying a template file.";
+        this.lastEvent = this.helperStatus;
+        this.recordActivity({
+          kind: "status",
+          text: this.helperStatus,
+        });
+        return null;
+      }
+
+      const attributed = result.finish;
+      const reportedSpan: ReportedSpan = {
+        messageIndex,
+        file: attributed.file,
+        startLine: attributed.startLine,
+        endLine: attributed.endLine,
+        source: "attributed",
+        confidence: attributed.confidence,
+        explanation: attributed.explanation,
+        quote: attributed.matchedSnippet,
+      };
+
+      capture.reported = (capture.reported ?? [])
+        .filter((span) => !(span.messageIndex === messageIndex && span.source === "attributed"))
+        .concat(reportedSpan);
+
+      this.live.set(capture.id, capture);
+      if (this.selectedId === capture.id) {
+        this.selected = capture;
+      }
+      await this.store.update(capture);
+
+      this.helperStatus = `Prompt attributed to ${attributed.file}:${attributed.startLine}–${attributed.endLine}`;
+      this.lastEvent = this.helperStatus;
+      this.recordActivity({
+        kind: "finish",
+        text: `Prompt attributed to ${attributed.file}:${attributed.startLine}–${attributed.endLine} (confidence: ${Math.round(attributed.confidence * 100)}%)`,
+        detail: attributed.explanation,
+      });
+      this.push();
+      return attributed;
+    } catch (error) {
+      if (run !== this.helperRun) {
+        return null;
+      }
+      this.helperStatus = error instanceof Error ? error.message : "Attribution failed.";
+      this.lastEvent = this.helperStatus;
+      this.recordActivity({
+        kind: "status",
+        text: this.helperStatus,
+      });
       return null;
     } finally {
       if (run === this.helperRun) {
@@ -1032,6 +1315,173 @@ export class TrackerApp {
     this.statusTimer = setTimeout(() => this.refreshStatus(), 4000);
   }
 
+  private async handleHelperMessage(userText: string): Promise<void> {
+    const query = userText.trim();
+    if (!query) {
+      return;
+    }
+    this.recordActivity({
+      kind: "user",
+      text: query,
+    });
+
+    if (!this.project) {
+      this.recordActivity({
+        kind: "status",
+        text: "Load a project first to use the AI helper.",
+      });
+      return;
+    }
+
+    const apiKey = await this.context.secrets.get(HELPER_SECRET);
+    if (!apiKey?.trim() || !this.helperModel) {
+      this.helperConnectOpen = true;
+      this.recordActivity({
+        kind: "status",
+        text: "Connect an AI helper and choose a Meta model first to interact with Meta AI.",
+      });
+      this.push();
+      return;
+    }
+
+    if (this.helperBusy) {
+      this.recordActivity({
+        kind: "status",
+        text: "The AI helper is currently busy with another operation.",
+      });
+      return;
+    }
+
+    const run = ++this.helperRun;
+    this.helperBusy = true;
+    this.helperStatus = "AI helper is thinking…";
+    this.status.text = "$(loading~spin) AI helper thinking";
+    this.status.show();
+    this.push();
+
+    try {
+      const projectPath = this.project.path;
+      const baseTools = addressTools(projectPath);
+      const chatTools = [
+        ...baseTools,
+        {
+          name: "respond",
+          description: "Provide your final response or explanation to the user.",
+          parameters: {
+            type: "object",
+            properties: {
+              message: { type: "string", description: "Your final answer, explanation, or response to the user." },
+            },
+            required: ["message"],
+          },
+          run: (args: unknown) => {
+            const msg = args && typeof args === "object" && "message" in args ? String((args as any).message) : "Done.";
+            return {
+              content: "Response delivered to user.",
+              finish: { url: "", relativeFile: "", line: 0, reason: msg, explanation: msg },
+            };
+          },
+        },
+      ];
+
+      const systemPrompt = [
+        "You are Context Tracker's autonomous AI assistant powered by Meta AI models (Muse Spark 1.3 and Muse Wonder).",
+        "You help developers understand, configure, and debug prompt capture and their LLM client code.",
+        `Current Project: ${this.project.name} (${this.project.path})`,
+        this.selected
+          ? `Currently Selected Prompt Capture: model=${this.selected.model}, provider=${this.selected.provider}, upstream=${this.selected.upstream}`
+          : "No prompt capture currently selected.",
+        "",
+        "You have access to sensory tools to inspect the developer's codebase and machine:",
+        "- detect_local_services: Probes local ports (Ollama on 11434, LM Studio on 1234, vLLM on 8000, etc.)",
+        "- find_user_config_dirs: Discovers user config directories (~/.config, ~/.<app>, %APPDATA%)",
+        "- search_text: Searches codebase for literal or regex patterns",
+        "- read_file: Reads project or user config files",
+        "- list_files: Lists directory contents",
+        "- propose_address: Proposes an active model address to connect capture",
+        "- respond: Delivers your final answer or explanation to the user",
+        "",
+        "Answer the user concisely and directly. If the user asks you to find an address, search code, or check ports, call the sensory tools first, then deliver your response using respond (or propose_address if proposing a connection).",
+      ].join("\n");
+
+      const result = await runHarness({
+        system: systemPrompt,
+        user: query,
+        tools: chatTools,
+        stepCap: 10,
+        allowDirectAnswer: true,
+        complete: (messages, toolsList) =>
+          completeChat({
+            baseUrl: META_HELPER_BASE,
+            apiKey,
+            model: this.helperModel,
+            messages,
+            tools: toolsList,
+          }),
+        onTool: (name) => {
+          if (run !== this.helperRun) return;
+          const step = helperStepLabel(name);
+          this.helperStatus = step;
+          this.push();
+        },
+        onEvent: (event) => {
+          if (run !== this.helperRun) return;
+          if (event.kind === "thought") {
+            this.recordActivity({ kind: "thought", text: event.text });
+          } else if (event.kind === "tool_call") {
+            this.recordActivity({
+              kind: "tool_call",
+              toolName: event.toolName,
+              text: formatToolCall(event.toolName, event.args),
+              detail: typeof event.args === "object" ? JSON.stringify(event.args, null, 2) : String(event.args),
+            });
+          } else if (event.kind === "tool_result") {
+            this.recordActivity({
+              kind: "tool_result",
+              toolName: event.toolName,
+              text: summarizeToolResult(event.toolName, event.content),
+              detail: event.content,
+            });
+          }
+        },
+      });
+
+      if (run !== this.helperRun) return;
+
+      if (result.finish) {
+        if (result.finish.url && result.finish.relativeFile) {
+          this.addressOffer = result.finish;
+          this.helperStatus = "The AI helper found a model address. Confirm it to start capture.";
+          this.recordActivity({
+            kind: "finish",
+            text: `Proposed address ${result.finish.url} in ${result.finish.relativeFile}:${result.finish.line}`,
+            detail: result.finish.reason || result.finish.explanation,
+          });
+        } else if (result.finish.explanation || result.finish.reason) {
+          const reply = result.finish.explanation || result.finish.reason;
+          this.recordActivity({
+            kind: "thought",
+            text: reply,
+          });
+          this.helperStatus = "AI helper finished.";
+        }
+      }
+    } catch (error) {
+      if (run !== this.helperRun) return;
+      this.helperStatus = error instanceof Error ? error.message : "AI helper communication failed.";
+      this.recordActivity({
+        kind: "status",
+        text: this.helperStatus,
+      });
+    } finally {
+      if (run === this.helperRun) {
+        this.helperBusy = false;
+        this.refreshStatus();
+        this.push();
+      }
+    }
+  }
+
   private buildState(): ViewState {
     const url = `http://127.0.0.1:${this.server?.port ?? CAPTURE_PORT}`;
     const bases = proposedBases(url);
@@ -1067,6 +1517,7 @@ export class TrackerApp {
         busy: this.helperBusy,
         status: this.helperStatus,
         offer: this.addressOffer,
+        activity: this.helperActivity,
       },
       env: this.project ? readEnvStatus(this.project.path, url, this.backupDir) : null,
       captures: this.summaries,
@@ -1104,5 +1555,52 @@ function helperStepLabel(name: string): string {
   if (name === "propose_address") {
     return "The AI helper is checking a model address it found.";
   }
+  if (name === "attribute_prompt") {
+    return "The AI helper is attributing prompt text to project source code.";
+  }
   return "The AI helper is connecting this project to capture.";
+}
+
+function formatToolCall(name: string, args: unknown): string {
+  if (typeof args !== "object" || args === null) {
+    return `${name}()`;
+  }
+  const record = args as Record<string, unknown>;
+  if (name === "search_text") {
+    const q = record.query || (Array.isArray(record.queries) ? record.queries.join(", ") : "");
+    return `search_text("${q}")`;
+  }
+  if (name === "read_file") {
+    return `read_file("${record.path || ""}")`;
+  }
+  if (name === "list_files") {
+    return `list_files("${record.path || "."}")`;
+  }
+  if (name === "find_user_config_dirs") {
+    const hints = Array.isArray(record.app_hints) ? record.app_hints.join(", ") : "";
+    return `find_user_config_dirs([${hints}])`;
+  }
+  if (name === "detect_local_services") {
+    return "detect_local_services()";
+  }
+  if (name === "propose_address") {
+    return `propose_address("${record.file || ""}", "${record.url || ""}")`;
+  }
+  if (name === "attribute_prompt") {
+    return `attribute_prompt("${record.file || ""}:${record.startLine || 1}–${record.endLine || 1}")`;
+  }
+  return `${name}(${JSON.stringify(args)})`;
+}
+
+function summarizeToolResult(name: string, content: string): string {
+  const trimmed = content.trim();
+  if (!trimmed) {
+    return "No output";
+  }
+  const lines = trimmed.split("\n");
+  if (lines.length === 1 && lines[0].length <= 140) {
+    return lines[0];
+  }
+  const firstLine = lines[0].slice(0, 140);
+  return `${firstLine}${lines.length > 1 ? ` (${lines.length} lines)` : ""}`;
 }

@@ -5,7 +5,7 @@ const path = require("node:path");
 const test = require("node:test");
 const { runHarness } = require("../out/harness.js");
 const { completeChat, helperChatUrl, listHelperModels, modelIdsFromResponse } = require("../out/helperClient.js");
-const { ADDRESS_SYSTEM, addressTools, buildDiagnosticUserPrompt, buildHelperUserPrompt, detectLocalServices, detectSourceConfigFile, findUserConfigDirs, inferAppHints, KNOWN_LOCAL_SERVICES, probePort, proposeAddress, searchText } = require("../out/helperTools.js");
+const { ADDRESS_SYSTEM, addressTools, ATTRIBUTION_SYSTEM, attributionTools, attributePrompt, buildAttributionUserPrompt, buildDiagnosticUserPrompt, buildHelperUserPrompt, detectLocalServices, detectSourceConfigFile, findUserConfigDirs, inferAppHints, KNOWN_LOCAL_SERVICES, probePort, proposeAddress, searchText } = require("../out/helperTools.js");
 const { expandHomeDir, isHomeConfigPath } = require("../out/paths.js");
 const { redactText } = require("../out/redact.js");
 const net = require("node:net");
@@ -742,4 +742,214 @@ test("diagnostic loop correctly pivots from a source fallback to a user config f
     fs.rmSync(root, { recursive: true, force: true });
     fs.rmSync(tmpHome, { recursive: true, force: true });
   }
+});
+
+test("ATTRIBUTION_SYSTEM guides invariant instruction extraction and parallel search", () => {
+  assert.match(ATTRIBUTION_SYSTEM, /Semantic Prompt Attribution/);
+  assert.match(ATTRIBUTION_SYSTEM, /DYNAMIC INTERPOLATION & TEMPLATE SKELETONS/);
+  assert.match(ATTRIBUTION_SYSTEM, /Separate Dynamic Runtime Data from Invariant Template Instructions/);
+  assert.match(ATTRIBUTION_SYSTEM, /search_text/);
+  assert.match(ATTRIBUTION_SYSTEM, /attribute_prompt/);
+  assert.match(ATTRIBUTION_SYSTEM, /Muse Spark 1\.3/);
+  assert.match(ATTRIBUTION_SYSTEM, /Muse Wonder/);
+});
+
+test("buildAttributionUserPrompt formats role, project, model and redacts secrets", () => {
+  const prompt = buildAttributionUserPrompt({
+    content: "System prompt instructions:\napi_key: sk-super-secret-token-12345\nAlways format as JSON.",
+    role: "system",
+    projectName: "MyAgent",
+    model: "llama-3-70b",
+  });
+
+  assert.match(prompt, /Project: MyAgent/);
+  assert.match(prompt, /Target Model: llama-3-70b/);
+  assert.match(prompt, /Captured Prompt \[Role: system\]:/);
+  assert.match(prompt, /Always format as JSON/);
+  // Secret should be redacted
+  assert.equal(prompt.includes("sk-super-secret-token-12345"), false);
+  assert.match(prompt, /\[private\]/);
+});
+
+test("attributePrompt validates file existence, line bounds, snippets and confidence", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ct-attr-test-"));
+  try {
+    fs.mkdirSync(path.join(root, "prompts"), { recursive: true });
+    const promptFile = path.join(root, "prompts", "system.jinja2");
+    fs.writeFileSync(
+      promptFile,
+      "You are a helpful customer support bot for {{ company_name }}.\nAlways answer politely.\nReturn answers in {{ format }}.\n",
+    );
+
+    // Missing file
+    const res1 = attributePrompt(root, { file: "nonexistent.py", startLine: 1, endLine: 2 });
+    assert.equal(res1.finish, undefined);
+    assert.match(res1.content, /not in the project/);
+
+    // Invalid line numbers
+    const res2 = attributePrompt(root, { file: "prompts/system.jinja2", startLine: 0, endLine: 2 });
+    assert.equal(res2.finish, undefined);
+    assert.match(res2.content, /positive integers/);
+
+    const res3 = attributePrompt(root, { file: "prompts/system.jinja2", startLine: 5, endLine: 3 });
+    assert.equal(res3.finish, undefined);
+    assert.match(res3.content, /endLine >= startLine/);
+
+    const res4 = attributePrompt(root, { file: "prompts/system.jinja2", startLine: 99, endLine: 100 });
+    assert.equal(res4.finish, undefined);
+    assert.match(res4.content, /exceeds the total lines/);
+
+    // Invalid snippet
+    const res5 = attributePrompt(root, {
+      file: "prompts/system.jinja2",
+      startLine: 1,
+      endLine: 2,
+      matchedSnippet: "Completely nonexistent text that cannot match anything",
+    });
+    assert.equal(res5.finish, undefined);
+    assert.match(res5.content, /matched snippet was not found/);
+
+    // Valid attribution
+    const res6 = attributePrompt(root, {
+      file: "prompts/system.jinja2",
+      startLine: 1,
+      endLine: 3,
+      confidence: 0.95,
+      explanation: "Matched system prompt template with customer support instructions",
+      matchedSnippet: "You are a helpful customer support bot",
+    });
+    assert.ok(res6.finish);
+    assert.equal(res6.finish.file, "prompts/system.jinja2");
+    assert.equal(res6.finish.startLine, 1);
+    assert.equal(res6.finish.endLine, 3);
+    assert.equal(res6.finish.confidence, 0.95);
+    assert.match(res6.finish.explanation, /customer support instructions/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("attributionTools and harness execution: Meta Muse attributes dynamic prompt to template", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ct-attr-harness-"));
+  try {
+    fs.mkdirSync(path.join(root, "prompts"), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, "prompts", "analyst.prompt"),
+      [
+        "# System Instructions",
+        "You are an expert financial analyst assistant.",
+        "Analyze the user's data according to SEC guidelines.",
+        "Company: {{ company_name }} (Ticker: {{ ticker }})",
+        "Format output as structured markdown bullet points.",
+      ].join("\n") + "\n",
+    );
+
+    const dynamicCapturedPrompt = [
+      "You are an expert financial analyst assistant.",
+      "Analyze the user's data according to SEC guidelines.",
+      "Company: Acme Corporation (Ticker: ACM)",
+      "Format output as structured markdown bullet points.",
+      "User question: What was Q3 net income?",
+    ].join("\n");
+
+    const tools = attributionTools(root);
+    let turns = 0;
+
+    const res = await runHarness({
+      system: ATTRIBUTION_SYSTEM,
+      user: buildAttributionUserPrompt({
+        content: dynamicCapturedPrompt,
+        role: "system",
+        projectName: "FinancialBot",
+      }),
+      stepCap: 4,
+      tools,
+      complete: async (messages) => {
+        turns++;
+        if (turns === 1) {
+          // Model identifies invariant phrase and searches project in Turn 1
+          return {
+            content: "Searching for invariant phrase 'SEC guidelines' in project templates.",
+            toolCalls: [
+              {
+                id: "attr-call-1",
+                name: "search_text",
+                arguments: JSON.stringify({ query: "SEC guidelines" }),
+              },
+            ],
+          };
+        }
+        // Model inspects search result and calls attribute_prompt in Turn 2
+        return {
+          content: "Located template in prompts/analyst.prompt. Calling attribute_prompt.",
+          toolCalls: [
+            {
+              id: "attr-call-2",
+              name: "attribute_prompt",
+              arguments: JSON.stringify({
+                file: "prompts/analyst.prompt",
+                startLine: 1,
+                endLine: 5,
+                confidence: 0.95,
+                explanation: "Template in prompts/analyst.prompt constructs the analyst prompt with dynamic company/ticker slots",
+                matchedSnippet: "Analyze the user's data according to SEC guidelines.",
+              }),
+            },
+          ],
+        };
+      },
+    });
+
+    assert.ok(res.finish, "Harness should finish with an attributed span");
+    assert.equal(res.finish.file, "prompts/analyst.prompt");
+    assert.equal(res.finish.startLine, 1);
+    assert.equal(res.finish.endLine, 5);
+    assert.equal(res.finish.confidence, 0.95);
+    assert.match(res.finish.explanation, /analyst prompt/);
+    assert.equal(res.steps, 2);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runHarness onEvent streams thoughts, tool_call, tool_result, and finish", async () => {
+  const events = [];
+  const result = await runHarness({
+    system: "test-system",
+    user: "test-user",
+    stepCap: 4,
+    tools: [
+      {
+        name: "test_tool",
+        description: "A test tool",
+        parameters: { type: "object", properties: { q: { type: "string" } } },
+        run: (args) => ({ content: "found 1 match" }),
+      },
+      {
+        name: "finish_tool",
+        description: "Finish",
+        parameters: { type: "object", properties: {} },
+        run: () => ({ content: "done", finish: { done: true } }),
+      },
+    ],
+    onEvent: (ev) => events.push(ev),
+    complete: async (messages) => {
+      if (messages.length <= 2) {
+        return {
+          content: "Thinking about which tool to call...",
+          toolCalls: [{ id: "call-1", name: "test_tool", arguments: JSON.stringify({ q: "sample" }) }],
+        };
+      }
+      return {
+        content: "Now finishing up.",
+        toolCalls: [{ id: "call-2", name: "finish_tool", arguments: "{}" }],
+      };
+    },
+  });
+
+  assert.equal(result.finish.done, true);
+  assert.equal(events.some((e) => e.kind === "thought" && e.text.includes("Thinking about")), true);
+  assert.equal(events.some((e) => e.kind === "tool_call" && e.toolName === "test_tool"), true);
+  assert.equal(events.some((e) => e.kind === "tool_result" && e.content.includes("found 1 match")), true);
+  assert.equal(events.some((e) => e.kind === "finish" && e.finish.done === true), true);
 });

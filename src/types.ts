@@ -21,6 +21,9 @@ export type ReportedSpan = {
   file: string;
   startLine: number;
   endLine: number;
+  source?: SpanSource;
+  confidence?: number;
+  explanation?: string;
 };
 
 export type StoredCapture = {
@@ -64,7 +67,7 @@ export type ProjectIndex = {
   clues: { file: string; line: number; text: string }[];
 };
 
-export type SpanSource = "matched" | "reported";
+export type SpanSource = "matched" | "reported" | "attributed";
 
 export type ViewSpan = {
   id: string;
@@ -77,6 +80,8 @@ export type ViewSpan = {
   canOpen: boolean;
   startLine?: number;
   endLine?: number;
+  confidence?: number;
+  explanation?: string;
 };
 
 export type CaptureView = {
@@ -151,9 +156,29 @@ export type AddressOffer = {
   previousFile?: string;
 };
 
+export type AttributedSpan = {
+  file: string;
+  startLine: number;
+  endLine: number;
+  confidence: number;
+  explanation: string;
+  matchedSnippet?: string;
+};
+
 export type HelperModelChoice = {
   id: string;
   label: string;
+};
+
+export type HelperActivityKind = "thought" | "tool_call" | "tool_result" | "status" | "finish" | "user";
+
+export type HelperActivityItem = {
+  id: string;
+  timestamp: number;
+  kind: HelperActivityKind;
+  text: string;
+  toolName?: string;
+  detail?: string;
 };
 
 export type HelperView = {
@@ -165,6 +190,7 @@ export type HelperView = {
   busy: boolean;
   status: string | null;
   offer: AddressOffer | null;
+  activity: HelperActivityItem[];
 };
 
 export type ViewState = {

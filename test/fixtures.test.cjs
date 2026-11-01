@@ -7,6 +7,10 @@ const { runHarness } = require("../out/harness.js");
 const {
   ADDRESS_SYSTEM,
   addressTools,
+  ATTRIBUTION_SYSTEM,
+  attributionTools,
+  attributePrompt,
+  buildAttributionUserPrompt,
   buildDiagnosticUserPrompt,
   buildHelperUserPrompt,
   detectLocalServices,
@@ -369,5 +373,244 @@ test("Self-Healing Diagnostic Demonstration across projects", async () => {
     os.homedir = origHomedir;
     fs.rmSync(root, { recursive: true, force: true });
     fs.rmSync(tmpHome, { recursive: true, force: true });
+  }
+});
+
+test("Dynamic Attribution Fixture A: Python f-string with interpolated variables and user input", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ct-fixture-a-fstring-"));
+  try {
+    fs.mkdirSync(path.join(root, "src"), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, "src", "assistant.py"),
+      [
+        "def build_agent_prompt(company: str, user_id: str, query: str) -> str:",
+        "    return f'''You are a customer service assistant for {company}.",
+        "User {user_id} says: {query}",
+        "Follow compliance rule: NEVER disclose customer SSN or banking credentials.'''",
+      ].join("\n") + "\n",
+    );
+
+    // Dynamic prompt sent to LLM with specific customer values
+    const dynamicPrompt = [
+      "You are a customer service assistant for Acme Corp.",
+      "User 98421 says: Can you reset my password?",
+      "Follow compliance rule: NEVER disclose customer SSN or banking credentials.",
+    ].join("\n");
+
+    const tools = attributionTools(root);
+    let turns = 0;
+
+    const res = await runHarness({
+      system: ATTRIBUTION_SYSTEM,
+      user: buildAttributionUserPrompt({
+        content: dynamicPrompt,
+        role: "system",
+        projectName: "acme-service-bot",
+      }),
+      stepCap: 4,
+      tools,
+      complete: async () => {
+        turns++;
+        if (turns === 1) {
+          return {
+            content: "Isolating invariant compliance instruction and searching Python codebase.",
+            toolCalls: [
+              {
+                id: "call-fa-1",
+                name: "search_text",
+                arguments: JSON.stringify({ query: "NEVER disclose customer SSN" }),
+              },
+            ],
+          };
+        }
+        return {
+          content: "Identified f-string prompt builder in src/assistant.py.",
+          toolCalls: [
+            {
+              id: "call-fa-2",
+              name: "attribute_prompt",
+              arguments: JSON.stringify({
+                file: "src/assistant.py",
+                startLine: 1,
+                endLine: 4,
+                confidence: 0.95,
+                explanation: "f-string template in src/assistant.py constructs prompt with dynamic user_id and query slots",
+                matchedSnippet: "Follow compliance rule: NEVER disclose customer SSN",
+              }),
+            },
+          ],
+        };
+      },
+    });
+
+    assert.ok(res.finish, "Should attribute f-string prompt");
+    assert.equal(res.finish.file, "src/assistant.py");
+    assert.equal(res.finish.startLine, 1);
+    assert.equal(res.finish.endLine, 4);
+    assert.equal(res.finish.confidence, 0.95);
+    assert.equal(res.steps, 2);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Dynamic Attribution Fixture B: Jinja2 template prompt with loops and conditional blocks", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ct-fixture-b-jinja-"));
+  try {
+    fs.mkdirSync(path.join(root, "templates"), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, "templates", "review_analyst.jinja2"),
+      [
+        "{% for review in reviews %}",
+        "- {{ review.title }}: {{ review.rating }}/5 stars",
+        "{% endfor %}",
+        "Task: Summarize product feedback strictly according to FTC endorsement guides.",
+      ].join("\n") + "\n",
+    );
+
+    // Dynamic prompt rendering 3 dynamic customer reviews
+    const dynamicPrompt = [
+      "- Great product: 5/5 stars",
+      "- Shipping took too long: 2/5 stars",
+      "- Battery life is average: 3/5 stars",
+      "Task: Summarize product feedback strictly according to FTC endorsement guides.",
+    ].join("\n");
+
+    const tools = attributionTools(root);
+    let turns = 0;
+
+    const res = await runHarness({
+      system: ATTRIBUTION_SYSTEM,
+      user: buildAttributionUserPrompt({
+        content: dynamicPrompt,
+        role: "user",
+        projectName: "review-bot",
+      }),
+      stepCap: 4,
+      tools,
+      complete: async () => {
+        turns++;
+        if (turns === 1) {
+          return {
+            content: "Searching for invariant phrase 'FTC endorsement guides' across templates.",
+            toolCalls: [
+              {
+                id: "call-fb-1",
+                name: "search_text",
+                arguments: JSON.stringify({ query: "FTC endorsement guides" }),
+              },
+            ],
+          };
+        }
+        return {
+          content: "Located Jinja2 template in templates/review_analyst.jinja2.",
+          toolCalls: [
+            {
+              id: "call-fb-2",
+              name: "attribute_prompt",
+              arguments: JSON.stringify({
+                file: "templates/review_analyst.jinja2",
+                startLine: 1,
+                endLine: 4,
+                confidence: 0.95,
+                explanation: "Jinja2 template iterating over dynamic customer reviews with FTC summary instructions",
+                matchedSnippet: "Task: Summarize product feedback strictly according to FTC endorsement guides.",
+              }),
+            },
+          ],
+        };
+      },
+    });
+
+    assert.ok(res.finish, "Should attribute Jinja2 template");
+    assert.equal(res.finish.file, "templates/review_analyst.jinja2");
+    assert.equal(res.finish.startLine, 1);
+    assert.equal(res.finish.endLine, 4);
+    assert.equal(res.finish.confidence, 0.95);
+    assert.equal(res.steps, 2);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Dynamic Attribution Fixture C: RAG pipeline injecting dynamic context snippets into system template", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ct-fixture-c-rag-"));
+  try {
+    fs.mkdirSync(path.join(root, "prompts"), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, "prompts", "rag_system.prompt"),
+      [
+        "You are an internal corporate policy advisor.",
+        "Answer questions strictly using the retrieved knowledge chunks below.",
+        "Core Directive: If the retrieved policy does not answer the question, state 'Policy does not specify.'",
+      ].join("\n") + "\n",
+    );
+
+    // Dynamic RAG prompt with 3 injected handbook chunks
+    const dynamicPrompt = [
+      "You are an internal corporate policy advisor.",
+      "Answer questions strictly using the retrieved knowledge chunks below.",
+      "Core Directive: If the retrieved policy does not answer the question, state 'Policy does not specify.'",
+      "",
+      "--- RETRIEVED CONTEXT CHUNKS ---",
+      "Chunk 1: Remote work policy allows up to 2 days per week with manager approval.",
+      "Chunk 2: Expense reimbursement requests must be submitted within 30 days of travel.",
+      "Chunk 3: Medical benefits begin on the first day of the month following hire date.",
+    ].join("\n");
+
+    const tools = attributionTools(root);
+    let turns = 0;
+
+    const res = await runHarness({
+      system: ATTRIBUTION_SYSTEM,
+      user: buildAttributionUserPrompt({
+        content: dynamicPrompt,
+        role: "system",
+        projectName: "policy-rag-agent",
+      }),
+      stepCap: 4,
+      tools,
+      complete: async () => {
+        turns++;
+        if (turns === 1) {
+          return {
+            content: "Filtering dynamic RAG chunks and searching for corporate policy advisor directive.",
+            toolCalls: [
+              {
+                id: "call-fc-1",
+                name: "search_text",
+                arguments: JSON.stringify({ query: "Policy does not specify" }),
+              },
+            ],
+          };
+        }
+        return {
+          content: "Attributed system template to prompts/rag_system.prompt.",
+          toolCalls: [
+            {
+              id: "call-fc-2",
+              name: "attribute_prompt",
+              arguments: JSON.stringify({
+                file: "prompts/rag_system.prompt",
+                startLine: 1,
+                endLine: 3,
+                confidence: 0.98,
+                explanation: "System prompt template in prompts/rag_system.prompt defining RAG advisor instructions and refusal directive",
+                matchedSnippet: "Core Directive: If the retrieved policy does not answer",
+              }),
+            },
+          ],
+        };
+      },
+    });
+
+    assert.ok(res.finish, "Should attribute RAG system prompt template");
+    assert.equal(res.finish.file, "prompts/rag_system.prompt");
+    assert.equal(res.finish.startLine, 1);
+    assert.equal(res.finish.endLine, 3);
+    assert.equal(res.finish.confidence, 0.98);
+    assert.equal(res.steps, 2);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });

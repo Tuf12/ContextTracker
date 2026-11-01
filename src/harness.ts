@@ -12,6 +12,12 @@ export type HarnessResult<T> = {
   steps: number;
 };
 
+export type HarnessEvent<T> =
+  | { kind: "thought"; text: string }
+  | { kind: "tool_call"; toolName: string; args: unknown }
+  | { kind: "tool_result"; toolName: string; content: string; isFinish: boolean }
+  | { kind: "finish"; finish: T };
+
 export async function runHarness<T>(options: {
   system: string;
   user: string;
@@ -19,6 +25,8 @@ export async function runHarness<T>(options: {
   stepCap: number;
   complete: (messages: ChatMessage[], tools: OpenAITool[]) => Promise<ChatTurn>;
   onTool?: (name: string) => void;
+  onEvent?: (event: HarnessEvent<T>) => void;
+  allowDirectAnswer?: boolean;
 }): Promise<HarnessResult<T>> {
   const specs = options.tools.map(openAITool);
   const messages: ChatMessage[] = [
@@ -29,7 +37,13 @@ export async function runHarness<T>(options: {
   while (steps < options.stepCap) {
     steps += 1;
     const turn = await options.complete(messages, specs);
+    if (turn.content && turn.content.trim()) {
+      options.onEvent?.({ kind: "thought", text: turn.content.trim() });
+    }
     if (turn.toolCalls.length === 0) {
+      if (options.allowDirectAnswer && turn.content && turn.content.trim()) {
+        return { finish: turn.content as unknown as T, steps };
+      }
       messages.push({ role: "assistant", content: turn.content });
       messages.push({ role: "user", content: "Call a tool. Finish by calling the finish tool." });
       continue;
@@ -42,8 +56,22 @@ export async function runHarness<T>(options: {
     messages.push({ role: "assistant", content: turn.content, tool_calls: calls });
     for (const call of turn.toolCalls) {
       options.onTool?.(call.name);
+      let parsedArgs: unknown = call.arguments;
+      try {
+        parsedArgs = JSON.parse(call.arguments);
+      } catch {
+        // keep string
+      }
+      options.onEvent?.({ kind: "tool_call", toolName: call.name, args: parsedArgs });
       const outcome = await runCall(options.tools, call.name, call.arguments);
+      options.onEvent?.({
+        kind: "tool_result",
+        toolName: call.name,
+        content: outcome.content,
+        isFinish: outcome.finish !== undefined,
+      });
       if (outcome.finish !== undefined) {
+        options.onEvent?.({ kind: "finish", finish: outcome.finish });
         return { finish: outcome.finish, steps };
       }
       messages.push({ role: "tool", content: outcome.content, tool_call_id: call.id });

@@ -1,81 +1,84 @@
 # Plan run findings
 
-- Plan path: SPEC.md
-- Started: Saturday, Oct 31, 2026, 12:55 PM (UTC-5)
+- Plan path: docs/plans/semantic-attribution.md
+- Started: Saturday, Oct 31, 2026, 2:45 PM (UTC-5)
 
-## Phase 1: Phase 1: Environment Grounding Tools
+## Phase 1: Phase 1: Template Asset Scope & Indexer Expansion
 
 ### Discrepancies
 
-- **1.1 socket/HTTP probe:** SPEC Phase 1.1 calls for a “socket/HTTP probe,” but `detectLocalServices` / `probePort` only open a TCP connection to `127.0.0.1` on the four standard ports. There is no HTTP request (e.g. to the URLs listed in SPEC §2.5), so any process listening on those ports is reported as that service.
-- **1.2 `~/.<name>` coverage in tests:** `findUserConfigDirs` checks `~/.<hint>` directories (and related dotfile patterns), but unit tests only exercise `~/.config/<app>` and a fake `%APPDATA%` tree—not a standalone `~/.<name>/` config directory called out in the plan.
-- **Scope beyond Phase 1:** The same working-tree diff that adds the grounding tools also includes Phase 2–oriented changes (expanded `ADDRESS_SYSTEM`, `search_text` regex/multi-query, `buildHelperUserPrompt`, `detectSourceConfigFile`), UI/flow work (`forgetAddress`, “Find address with AI helper”), and other edits (`indexer.ts`, `paths.ts`, `redirect.ts`). Phase 1 deliverables are present, but they are not isolated to this phase in the diff.
-- **Minor:** `isHomeConfigPath` is imported in `src/helperTools.ts` but unused (path-safety tests live in `test/helper.test.cjs` against `paths.ts`).
+- Phase 1 changes are **uncommitted** (working-tree edits to `src/indexer.ts` and `test/trace.test.cjs` only; not on `HEAD`).
+- Plan **1.1** lists adding `.jinja`, `.j2`, and `.prompt`; those extensions were **already** in `EXTENSIONS` at `HEAD`. This phase adds `.template`, `.mustache`, and `.hbs` as required, plus non-plan extras `.jinja2`, `.tpl`, and `.liquid`.
+- Plan **1.2** asks to ensure template assets are not excluded by **size limits**; implementation does not add template-specific handling or tests—`readIndexedFile` still skips files over `MAX_FILE_BYTES` (400KB) and zero-byte files, same as before.
+- Architecture **§2.1** (referenced by the phase objective) mentions **external discovered configuration prompt paths**; no indexer logic for config-discovered paths appears in the Phase 1 diff (only `prompts/`, `templates/`, and `prompt_templates/` parent dirs for extensionless files).
+- Plan **1.3** cites Jinja2 indexing; the new test indexes `.jinja2` but does **not** include a `.j2`-named fixture (though `.j2` remains in `EXTENSIONS`).
 
 ### User checks (deferred)
 
 - None.
 
-## Phase 2: Phase 2: Autonomous Architecture Analysis Prompting
+## Phase 2: Phase 2: Autonomous Semantic Attribution Prompting & Tools
 
 ### Discrepancies
 
-- **2.3 verification vs live Meta model:** Phase 2.3 calls for testing helper runs on test repositories with single-turn resolution. The added tests (`helper runs on test repository with single-turn resolution`, `helper discovers architecture and resolves active user config in 2 turns`) drive `runHarness` with a mocked `complete` callback that simulates Muse parallel tool use—they do not exercise the real Meta helper client or Muse Spark / Wonder endpoints.
-- **2.3 “single-turn” vs two-turn test:** The plan’s verification bullet emphasizes single-turn resolution, but the suite also adds an explicit 2-turn scenario test. That aligns with the spec success metric (≤ 2 turns) but is broader than the Phase 2.3 wording alone.
-- **Prompt-only vs TypeScript heuristics:** Phase 2’s objective is to upgrade the system prompt and reasoning flow so the model classifies architecture instead of blind string matching. `detectSourceConfigFile` plus the `proposeAddress` guard use regex/heuristics on `.js`/`.ts`/`.py` sources to reject Type D proposals and redirect to user config files—overlapping the runtime-precedence rule in the prompt and echoing the anti-pattern the spec warns about in §1.2.
-- **“Startup sequences” wording:** Plan 2.1 says to query sensory tools when analyzing startup sequences. `ADDRESS_SYSTEM` instructs calling `detect_local_services` and `find_user_config_dirs` for local endpoints and external configs but does not mention startup or boot sequences explicitly.
-- **`buildHelperUserPrompt` project path:** `app.ts` passes `{ name, path }`, but the builder only emits `Project name:`—`path` is unused in the user prompt.
-- **Scope beyond Phase 2:** The same diff bundles UI/flow work (`forgetAddress`, “Find address with AI helper”, `ignoredEndpoints`), expanded indexer clues/redaction, `expandHomeDir` / home-config path fixes, and redirect label tweaks—supporting the helper UX but not listed under Phase 2 deliverables.
-- **Minor:** `isHomeConfigPath` remains imported in `src/helperTools.ts` but unused.
+- Phase 2 deliverables are **uncommitted** (working-tree edits to `src/helperTools.ts`, `src/types.ts`, `test/helper.test.cjs`, plus a small `src/app.ts` `helperStepLabel` branch for `attribute_prompt`; not on `HEAD`).
+- Plan **2.1** / architecture **§3.3** call for line numbers within file bounds before acceptance; `attributePrompt` **clamps** `endLine` to `totalLines` instead of rejecting out-of-range `endLine`, and returns `finish.endLine` as the clamped value.
+- Plan **2.1** says to validate that the **matched snippet corresponds to the code**; `matchedSnippet` is **optional** in the tool schema and snippet checks are **skipped** when omitted, so attributions can succeed with file/line validation only.
+- When `matchedSnippet` is provided, verification is **loose** (case-insensitive substring or any snippet line longer than 5 chars), which is weaker than strict correspondence to the attributed line range.
+- Plan **2.4** harness completion is covered by tests that **mock** `complete` (simulated Muse tool turns); they do not exercise the live Meta helper client or Muse Spark / Wonder endpoints.
+- Plan **2.2** emphasizes **parallel** `search_text` (and read) in a single turn; the harness fixture uses **one** `search_text` call in turn 1 and does not assert parallel multi-query behavior.
+- **`buildAttributionUserPrompt`** truncates captured content at 2000 characters (not specified in plan **2.3**); it includes project name and model but not project filesystem path.
+- Minor cross-phase prep in the same diff: `AttributedSpan` in `src/types.ts` and UI step copy in `app.ts`—Phase 3 owns wiring attribution into captures/UI per the plan.
 
 ### User checks (deferred)
 
 - None.
 
-## Phase 3: Phase 3: Traffic Watchdog & Missed Connection Detection
+## Phase 3: Phase 3: Extension Pipeline & Span Integration
 
 ### Discrepancies
 
-- **3.1 idle triggers beyond “user activity”:** Phase 3.1 only describes transitioning to `listening_idle` when capture is active but zero requests arrive **after user activity**. `TrafficWatchdog` also transitions on a fixed **12s silence** timer (`checkIdle` via `setInterval`) with no user activity required. That matches SPEC §3 Loop 3 (“extension observes”) but is broader than the Phase 3.1 bullet alone.
-- **3.1 “user activity” = webview traffic:** `app.ts` calls `watchdog.recordUserActivity()` on **every** panel message (including `ready` and routine UI clicks), not on signals from the target app or an explicit “prompt was sent” event. Idle-after-activity can fire from interacting with Context Tracker’s panel after ~5s (`activityIdleSeconds`), not necessarily from using the connected app.
-- **3.1 uptime display not live:** Request count and uptime since capture start are implemented (`getRequestCount`, `getUptimeSeconds`, shown in `trafficSummary`), but the watchdog timer only runs `checkIdle()`; it does not refresh the webview each second. Uptime in the Capture card updates only when something else calls `push()` (state change, capture, panel message), not as a continuous heartbeat in the UI.
-- **3.2 troubleshoot hint upstream mismatch:** `missedHint` uses the watchdog’s `plan.upstream` (set at capture start). `troubleshootConnection`’s `lastEvent` uses `this.route.customUpstream || "the model provider"`, which can disagree with the actual routed upstream in **auto** mode.
-- **Troubleshoot vs full SPEC troubleshoot loop:** SPEC §3 Loop 3 describes **Troubleshoot Connection** (or autonomous watchdog) leading to Meta AI **diagnostic re-engagement**. Phase 3 deliverables are the button and upstream bypass hint only; the handler sets idle/hint and logs—it does **not** start the Phase 4 diagnostic harness. Correct phase boundary, but the end-to-end SPEC troubleshoot flow is not complete until Phase 4.
-- **Scope beyond Phase 3:** The same working-tree diff bundles non–Phase 3 UX (`forgetAddress`, “Find address with AI helper”, helper-card find button, warning banner CSS) plus earlier-phase helper/index/redirect changes alongside `src/watchdog.ts` and `test/watchdog.test.cjs`.
+- Phase 3 deliverables are **uncommitted** (working-tree edits to `src/types.ts`, `src/matcher.ts`, `src/app.ts`, and `test/trace.test.cjs`; bundled in the same diff as Phases 1–2 and not on `HEAD`).
+- Plan **3.1** lists attribution metadata on **`StoredCapture`**; implementation adds `confidence` / `explanation` (and optional `source`) on **`ReportedSpan`** and **`ViewSpan`** only—no new top-level fields on `StoredCapture`.
+- Plan **3.2** allows a dedicated **`attributedSpans` map**; implementation stores attributions in **`capture.reported`** with `source: "attributed"`, replacing prior attributed rows for the same `messageIndex` (aligned with the “or reported” option, not a separate map).
+- Plan **3.3** names **`src/derive.ts`**; **`derive.ts` is unchanged**—integration is entirely in **`matcher.ts`** (`placeOne`, `combineSpans`, `fileLabel`, `ViewSpan` fields) while `deriveCapture` already passes per-message `reported` into `deriveMessageSpans`.
+- Plan **3.3** requires attributed spans alongside exact matches **without collision**; `combineSpans` implements overlap handling, but **3.4 adds no test** where both a passive **matched** span and an **attributed** span apply to the same message (only a dynamic-prompt case with no asserted exact matches).
+- Plan **3.4** persistence test **simulates** attribution by pushing to `capture.reported` and calling `store.update`; it does **not** exercise **`TrackerApp.attributeCaptureMessage`** or the **`attributeMessage`** webview action (Phase 4 UI for the button is still absent in `media/panel.js`).
+- **`attributeCaptureMessage`** wires the **live** `completeChat` Meta helper client; there is **no unit test** mocking that path (unlike Phase 2 harness tests in `test/helper.test.cjs`).
+- Attributed placement when **`quote` is absent** falls back to highlighting the **entire message** (`charStart` 0 … `charEnd` `content.length`), which is broader than a file-line span and may interact aggressively with overlap logic when exact matches exist (behavior not covered by tests).
 
 ### User checks (deferred)
 
 - None.
 
-## Phase 4: Phase 4: Autonomous Self-Healing Diagnostic Loop
+## Phase 4: Phase 4: UI Actions & Interactive Attribution Badges
 
 ### Discrepancies
 
-- **Autonomous watchdog → diagnostic harness:** SPEC §2 Loop 3 and the phase title imply self-healing when capture misses traffic (user **Troubleshoot Connection** *or* an autonomous watchdog). `TrafficWatchdog` idle transitions only set `listening_idle` / `missedHint` and `onStateChange` triggers `push()`—they never call `diagnoseConnection`. The Meta diagnostic loop runs only after an explicit **Troubleshoot Connection** click, and only when `currentEndpoint`, `project`, and a saved helper model/key are all present.
-- **4.1 “Diagnostic Harness Mode” vs reuse:** The plan names a distinct diagnostic harness mode; implementation reuses the same `runHarness` + `ADDRESS_SYSTEM` as initial discovery, differing only via `buildDiagnosticUserPrompt`, `addressTools(..., { failedFile, failedUrl })`, and the `proposeAddress` re-proposal guard—not a separate system prompt or harness mode.
-- **4.3 tests vs `diagnoseConnection` wiring:** Phase 4.3 adds harness-level tests (`buildDiagnosticUserPrompt`, failed-file rejection, pivot fixture with mocked `complete`) but no test imports or exercises `AppController.diagnoseConnection`, `troubleshootConnection` → diagnose, or UI `confirmAddress` after a diagnostic offer.
-- **4.3 verification vs live Meta model:** Like Phase 2.3, pivot tests simulate Muse tool turns with a mocked `complete` callback; they do not hit the real Meta helper client or Muse Spark / Wonder endpoints.
-- **Troubleshoot without helper:** If the user clicks **Troubleshoot Connection** without a connected helper (or without `currentEndpoint`), the flow falls back to watchdog idle state and a manual upstream hint—no queued diagnostic run when the helper is connected later.
-- **Scope beyond Phase 4:** The same working-tree diff still bundles Phase 1–3 helper, indexer, redirect, watchdog, and panel UX changes alongside `diagnoseConnection`, `buildDiagnosticUserPrompt`, and diagnostic tool guards.
+- Phase 4 deliverables are **uncommitted** (working-tree edits to `media/panel.js` and `media/panel.css`; `attributeMessage` handling in `src/app.ts` is in the same diff and required for the button to function).
+- Plan **4.1** shows the button when `spans.length === 0` **or** there are no file spans; implementation sets `canAttribute = !hasFileSpan && message.spans.length > 0 && message.role !== "assistant"`, so messages with **zero spans** (e.g. empty content) never get the button—the **`spans.length > 0`** guard contradicts the plan’s first condition (typical unmatched prompts still get a runtime gap span, so the primary dynamic-prompt case is covered).
+- Plan **4.1** does not restrict by role; the UI **hides** the control on **assistant** messages.
+- Plan **4.1** loading state is local (`Attributing…`, `attributingMessage`) plus extension `helperBusy` / status bar; the button is also **disabled whenever `state.helper.busy`** for any helper operation, not only attribution.
+- Plan **4.2** tooltip text *"Attributed by Meta AI: [explanation]"*; implementation matches when `explanation` is set but **appends confidence** `(confidence: N%)`, and when `explanation` is missing the `title` falls back to **`span.label`** instead of the prescribed prefix.
+- Plan **4.2** “clicking the span opens the source file”: **block headers** call `openSpan` (opens editor at lines when `canOpen`); **bar** segment buttons still call **`focusSpan`** (scroll/highlight only)—same as pre-existing matched-span behavior, not full open-on-click for the bar slice.
+- No **automated or webview tests** for `attributeMessage`, loading UI, badges, or tooltips (plan does not require Phase 4 tests; coverage remains manual / extension-only).
 
 ### User checks (deferred)
 
 - None.
 
-## Phase 5: Phase 5: Multi-Project Hackathon Demonstration Suite
+## Phase 5: Phase 5: Dynamic Prompt Test Fixtures & Video Script Update
 
 ### Discrepancies
 
-- **5.1 fixture form vs “projects”:** Phase 5.1 names four representative apps (OptimalX, EidosBot, etc.). Implementation is **`test/fixtures.test.cjs` only**—each test builds ephemeral temp directories inline. There are **no checked-in sample project trees** (e.g. under `test/fixtures/`) for judges or developers to open outside the test runner.
-- **5.1 Project D vs SPEC wording:** SPEC 5.1 calls for a Next.js app with **`OPENAI_BASE_URL`**. The fixture test title mentions that env var, but the harness **finishes on `settings.json`** (`https://openrouter.ai/api/v1`). `route.ts` references `process.env.OPENAI_BASE_URL`, but the test does not drive discovery or rewrite through `.env` / that env key.
-- **5.1 Project C vs `.env` / SDK focus:** SPEC emphasizes **`.env` + OpenAI SDK**. The test covers `.env` via `readEnvStatus` / `applyEnv` / `restoreEnv`, but the **helper harness proposes `config.py`** (`DEFAULT_BASE_URL`), not an `.env`-based `OPENAI_BASE_URL` offer.
-- **Objective “validate autonomous connects” vs test depth:** Phase 5’s objective is end-to-end validation across frameworks. All four project tests (and the self-healing demo) use **`runHarness` with a mocked `complete` callback**—same limitation as Phases 2.3 / 4.3. They do not exercise the VS Code extension capture path, file rewrite rollback in the UI, or the live Meta helper client.
-- **Project B local Ollama grounding:** The mocked turn returns `detect_local_services` and `propose_address` together; the test asserts **one step** and a `config.yaml` finish. It does **not** assert that a local service probe succeeded or that Ollama was listening—only that the harness accepts the scripted tool sequence.
-- **Project A “Electron”:** Fixture is **Node `main.js` + `@optimalx/desktop` in `package.json`** with a user config under `~/.config/optimalx`. There is no Electron main/preload structure or dependency—Electron is descriptive labeling, not a distinct stack fixture.
-- **5.2 showcase vs product behavior:** `HACKATHON_SHOWCASE.md` delivers documentation and a **3-minute video script** (aligned with 5.2). Loop 3 text says diagnostic re-engagement happens when the user clicks **Troubleshoot Connection** **“(or watchdog triggers)”**; **`TrafficWatchdog` still does not call `diagnoseConnection`**—only explicit troubleshoot (with helper prerequisites) does. The video script also describes live capture latency (“under two seconds”) and UI flows **not automated** in `fixtures.test.cjs`.
-- **Showcase table vs SPEC 5.1:** The showcase matrix describes Project D as **`settings.json` / OpenRouter**, which matches the test but **diverges from SPEC Phase 5.1’s `OPENAI_BASE_URL` bullet**.
-- **Commit state:** `test/fixtures.test.cjs` and `HACKATHON_SHOWCASE.md` are **untracked** in the current working tree; Phase 5 deliverables are present on disk but not part of the latest committed diff (`main` ahead 1 with other files staged/modified).
-- **Overlap with Phase 4 tests:** The fifth fixture test (“Self-Healing Diagnostic Demonstration”) overlaps the Phase 4 **`diagnostic loop correctly pivots…`** scenario in `test/helper.test.cjs` (user-config pivot with mocked turns)—Phase 5 consolidates naming for the demo suite but adds limited new behavioral coverage.
+- Phase 5 deliverables are **uncommitted** (working-tree edits to `test/fixtures.test.cjs` and `HACKATHON_SHOWCASE.md`; tracked on `HEAD` but modified, not committed).
+- Phase **objective** calls for **end-to-end** attribution on diverse dynamic prompts; the three new tests exercise **`runHarness` + `ATTRIBUTION_SYSTEM` with a mocked `complete` callback** only—they do not run capture → passive matcher (0 spans) → **`attributeCaptureMessage`** / panel UI → span persistence.
+- Plan **5.1 Fixture B** specifies Jinja2 with **loops and conditional blocks**; the fixture template uses a **`{% for %}` loop only** (no `{% if %}` / conditional block in template or rendered prompt).
+- Plan **5.1 Fixture C** names a **RAG pipeline**; implementation is a **static** `prompts/rag_system.prompt` plus a hand-built dynamic prompt string with injected chunk text—no retrieval/injection code path or vector-store component under test.
+- Dynamic fixture tests **script** one `search_text` then `attribute_prompt` in two turns; they do not assert that **`search_text` / `read_file` discover** the attributed file from disk (unlike a live Muse run), only that the harness accepts the mocked tool sequence and **`attribute_prompt` validation** against written temp files.
+- **`attributePrompt`** is imported in `test/fixtures.test.cjs` but **unused** (minor dead import in the Phase 5 diff).
+- Plan **5.2** / showcase **Loop 4** and the video script mention attribution **“(or it runs autonomously)”**; the extension UI (Phase 4) exposes a **manual** **“Attribute with Meta AI”** button only—no autonomous attribution trigger is implemented.
+- **Showcase copy inconsistency:** Loop 4 and the **[1:15–1:55]** script use example paths **`prompts/analyst.prompt` lines 1–5**, while the fixture table and tests use **`src/assistant.py`**, **`templates/review_analyst.jinja2`**, and **`prompts/rag_system.prompt`** with different line ranges.
 
 ### User checks (deferred)
 

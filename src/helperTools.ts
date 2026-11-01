@@ -5,7 +5,7 @@ import path from "path";
 import type { HelperTool } from "./harness";
 import { isHomeConfigPath, isInside, resolveAddressFile, toRelative } from "./paths";
 import { isSecretFile, redactText } from "./redact";
-import type { AddressOffer } from "./types";
+import type { AddressOffer, AttributedSpan } from "./types";
 
 const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "out", "__pycache__", ".venv", "venv"]);
 const MAX_FILE = 200_000;
@@ -41,6 +41,31 @@ export const ADDRESS_SYSTEM = [
   "- Do not invent a URL. The proposed URL must exist verbatim in the file you propose.",
   "- Port 47321 is Context Tracker's own recording proxy; never propose port 47321.",
   "- When you identify the active file and the exact URL configured there, call propose_address to finish.",
+].join("\n");
+
+export const ATTRIBUTION_SYSTEM = [
+  "You are Context Tracker's autonomous Semantic Prompt Attribution agent powered by Meta AI models (Muse Spark and Muse Wonder).",
+  "Your mission is to inspect a prompt that was sent to an LLM provider and reverse-engineer which source file, template, or prompt-builder function in the codebase generated this prompt.",
+  "",
+  "### DYNAMIC INTERPOLATION & TEMPLATE SKELETONS",
+  "Modern AI applications construct prompts dynamically using template engines (Jinja2, Mustache, f-strings, LangChain PromptTemplates, YAML/JSON configs) with dynamic runtime variable slots.",
+  "1. Separate Dynamic Runtime Data from Invariant Template Instructions:",
+  "   - Dynamic slots: specific user queries, current timestamps, database records, IDs, retrieved RAG context chunks.",
+  "   - Invariant skeleton: system instructions, role descriptions, output formatting rules, schema definitions, template placeholders (e.g. {{ variable }} or {slot}).",
+  "2. Formulate Sensory Searches:",
+  "   - Do NOT search for the entire prompt verbatim, as dynamic values will prevent matches.",
+  "   - Extract unique, high-specificity phrases (e.g. 10-40 character distinctive phrases from the system instruction or template skeleton).",
+  "   - Use search_text with single or multiple queries to find candidate files across the codebase.",
+  "3. Verify and Pinpoint:",
+  "   - Inspect candidate files with read_file.",
+  "   - Match the template text or prompt-builder code.",
+  "   - Determine the exact file and the 1-based startLine and endLine where the prompt is defined.",
+  "",
+  "### PARALLEL RECONNAISSANCE EFFICIENCY",
+  "- Muse Spark 1.3 and Muse Wonder support parallel tool calling. In your initial turn, run parallel search_text calls across multiple candidate phrases from the prompt to locate candidate files in 1 turn.",
+  "",
+  "### FINISH TOOL",
+  "- Once you have confirmed the file and line range, call attribute_prompt with file, startLine, endLine, confidence (0.0 to 1.0), an explanation, and the matchedSnippet.",
 ].join("\n");
 
 export function addressTools(
@@ -221,6 +246,137 @@ export function detectSourceConfigFile(filePath: string, text: string): string |
   }
 
   return null;
+}
+
+export function attributionTools(root: string): Array<HelperTool<AttributedSpan>> {
+  return [
+    {
+      name: "list_files",
+      description: "List the names in one project directory. path is relative to the project root. Use . for the root.",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"],
+      },
+      run: (args) => ({ content: listFiles(root, stringField(args, "path") || ".") }),
+    },
+    {
+      name: "search_text",
+      description: "Search project text for a literal query, regex pattern, or multiple queries. Returns redacted matching lines.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Search query or regex pattern (e.g. 'You are a helpful assistant')." },
+          queries: {
+            type: "array",
+            items: { type: "string" },
+            description: "Optional array of multiple search terms to match in one pass.",
+          },
+        },
+      },
+      run: (args) => ({ content: searchText(root, args) }),
+    },
+    {
+      name: "read_file",
+      description: "Read a text file in the project. Secret values are replaced with [private].",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"],
+      },
+      run: (args) => ({ content: readFile(root, stringField(args, "path")) }),
+    },
+    {
+      name: "attribute_prompt",
+      description: "Finish by attributing the prompt to a specific file and line range in the project.",
+      parameters: {
+        type: "object",
+        properties: {
+          file: { type: "string", description: "Relative file path in the project that constructed or contains the prompt." },
+          startLine: { type: "integer", description: "1-based starting line number in the file." },
+          endLine: { type: "integer", description: "1-based ending line number in the file." },
+          confidence: { type: "number", description: "Attribution confidence score between 0.0 and 1.0." },
+          explanation: { type: "string", description: "Concise reason explaining why this file/line generated the prompt." },
+          matchedSnippet: { type: "string", description: "Snippet from the file that matches the prompt template or builder." },
+        },
+        required: ["file", "startLine", "endLine", "confidence", "explanation"],
+      },
+      run: (args) => attributePrompt(root, args),
+    },
+  ];
+}
+
+export function attributePrompt(root: string, args: unknown): { content: string; finish?: AttributedSpan } {
+  if (!args || typeof args !== "object") {
+    return { content: "Arguments object is required." };
+  }
+  const rec = args as Record<string, unknown>;
+  const file = typeof rec.file === "string" ? rec.file.trim() : "";
+  const explanation = typeof rec.explanation === "string" ? rec.explanation.trim() : "";
+  const matchedSnippet = typeof rec.matchedSnippet === "string" ? rec.matchedSnippet.trim() : "";
+  const startLine = typeof rec.startLine === "number" ? Math.floor(rec.startLine) : parseInt(String(rec.startLine ?? ""), 10);
+  const endLine = typeof rec.endLine === "number" ? Math.floor(rec.endLine) : parseInt(String(rec.endLine ?? ""), 10);
+
+  if (!file) {
+    return { content: "file is required." };
+  }
+  if (!Number.isFinite(startLine) || !Number.isFinite(endLine) || startLine < 1 || endLine < startLine) {
+    return { content: "startLine and endLine must be valid positive integers where endLine >= startLine." };
+  }
+
+  const absolute = resolveAddressFile(root, file);
+  if (!absolute) {
+    return { content: "That file is not in the project or allowed configuration paths." };
+  }
+  if (isSecretFile(absolute)) {
+    return { content: "That file is private and cannot be attributed." };
+  }
+
+  let text: string;
+  try {
+    text = fs.readFileSync(absolute, "utf8");
+  } catch {
+    return { content: "That file could not be read." };
+  }
+
+  const lines = text.split(/\r?\n/);
+  const totalLines = lines.length;
+  if (startLine > totalLines) {
+    return { content: `startLine (${startLine}) exceeds the total lines in the file (${totalLines}).` };
+  }
+
+  const clampedEnd = Math.min(endLine, totalLines);
+  const targetSlice = lines.slice(startLine - 1, clampedEnd).join("\n").trim();
+  if (!targetSlice) {
+    return { content: "The specified line range is empty." };
+  }
+
+  if (matchedSnippet) {
+    const fileContentLower = text.toLowerCase();
+    const cleanSnippet = matchedSnippet.toLowerCase();
+    const snippetLines = cleanSnippet.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 5);
+    const hasOverlap = fileContentLower.includes(cleanSnippet) ||
+      snippetLines.some((l) => fileContentLower.includes(l));
+    if (!hasOverlap) {
+      return { content: "The matched snippet was not found in the file." };
+    }
+  }
+
+  const rawConf = typeof rec.confidence === "number" ? rec.confidence : parseFloat(String(rec.confidence ?? "0.8"));
+  const confidence = Number.isFinite(rawConf) ? Math.max(0.1, Math.min(1.0, rawConf)) : 0.8;
+
+  const relative = isInside(root, absolute) ? toRelative(root, absolute) : absolute;
+  return {
+    content: "Attribution accepted.",
+    finish: {
+      file: relative,
+      startLine,
+      endLine: clampedEnd,
+      confidence,
+      explanation: explanation || `Prompt originates from ${relative}:${startLine}-${clampedEnd}`,
+      matchedSnippet: matchedSnippet || targetSlice.slice(0, 200),
+    },
+  };
 }
 
 function listFiles(root: string, relativeDir: string): string {
@@ -452,6 +608,43 @@ export function buildDiagnosticUserPrompt(options: {
     const lines = sample.map((c) => `- ${c.file}:${c.line}: ${c.text}`);
     parts.push(`Preliminary scan detected these potential references in the project. Check these first:\n${lines.join("\n")}`);
   }
+
+  return parts.join("\n\n");
+}
+
+export function buildAttributionUserPrompt(options: {
+  content: string;
+  role?: string;
+  projectName?: string;
+  model?: string;
+}): string {
+  const parts: string[] = [];
+  parts.push("Investigate this prompt captured from the application and identify which source file, template, or prompt builder function in the project generated it.");
+
+  if (options.projectName) {
+    parts.push(`Project: ${options.projectName}`);
+  }
+  if (options.model) {
+    parts.push(`Target Model: ${options.model}`);
+  }
+
+  const MAX_PROMPT_PREVIEW = 2000;
+  const rawContent = options.content.trim();
+  const content = rawContent.length > MAX_PROMPT_PREVIEW
+    ? rawContent.slice(0, MAX_PROMPT_PREVIEW) + "\n... [truncated]"
+    : rawContent;
+  const roleLabel = options.role ? `[Role: ${options.role}]` : "";
+
+  parts.push(`Captured Prompt ${roleLabel}:\n\`\`\`\n${redactText(content)}\n\`\`\``);
+  parts.push(
+    [
+      "Instructions:",
+      "1. Identify invariant template phrases (system instructions, structural headers, formatting rules) vs dynamic variable slots (user inputs, database rows, timestamps).",
+      "2. Use search_text to find candidate files matching the invariant phrases.",
+      "3. Inspect candidate files with read_file to verify the exact template or builder function.",
+      "4. Call attribute_prompt with the relative file, startLine, endLine, confidence, and explanation.",
+    ].join("\n"),
+  );
 
   return parts.join("\n\n");
 }

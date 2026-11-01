@@ -40,7 +40,8 @@ const SKIP_FILES = new Set([
 const EXTENSIONS = new Set([
   ".py", ".pyi", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".md", ".mdx",
   ".json", ".yaml", ".yml", ".txt", ".html", ".css", ".rs", ".go", ".java",
-  ".rb", ".php", ".toml", ".jinja", ".j2", ".prompt", ".xml", ".sql", ".vue",
+  ".rb", ".php", ".toml", ".jinja", ".jinja2", ".j2", ".prompt", ".template",
+  ".mustache", ".hbs", ".tpl", ".liquid", ".xml", ".sql", ".vue",
   ".svelte", ".cs", ".cpp", ".h", ".hpp", ".c", ".kt", ".swift", ".sh", ".lua",
   ".rst", ".tf", ".graphql", ".prisma", ".mdc",
 ]);
@@ -126,7 +127,7 @@ export async function indexProject(
         stack.push(absolute);
         continue;
       }
-      if (!entry.isFile() || !shouldIndexFile(entry.name)) {
+      if (!entry.isFile() || !shouldIndexFile(entry.name, dir)) {
         continue;
       }
       if (fileCount >= MAX_FILES) {
@@ -158,18 +159,27 @@ export async function indexProject(
   return { root, fileCount, truncated, lines, fileLines, clues };
 }
 
-function shouldIndexFile(name: string): boolean {
+function shouldIndexFile(name: string, dir?: string): boolean {
   if (SKIP_FILES.has(name.toLowerCase())) {
     return false;
   }
-  if (name === ".env" || name.startsWith(".env.") && name !== ".env.example") {
+  if (name === ".env" || (name.startsWith(".env.") && name !== ".env.example")) {
     return false;
   }
   if (name.endsWith(".pem") || name.endsWith(".key")) {
     return false;
   }
   const extension = path.extname(name).toLowerCase();
-  return EXTENSIONS.has(extension) || name === ".env.example";
+  if (EXTENSIONS.has(extension) || name === ".env.example") {
+    return true;
+  }
+  if (dir && !extension) {
+    const parent = path.basename(dir).toLowerCase();
+    if (parent === "prompts" || parent === "templates" || parent === "prompt_templates") {
+      return true;
+    }
+  }
+  return false;
 }
 
 async function readIndexedFile(root: string, absolute: string): Promise<{
