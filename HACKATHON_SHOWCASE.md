@@ -107,6 +107,20 @@ To prevent hallucinations and provide ground-truth awareness of the developer's 
   - **Section Anatomy Cards:** Displays category badges (`🟢 System`, `🟣 RAG Grounding`, `🟡 Chat History`, `🔧 Tool Schemas`), token metrics, and `🎯 WHAT` / `💡 WHY` purpose statements.
   - **Loop 6 to Loop 4 Bridge:** Clicking **"✨ Trace in Code"** on an identified RAG or template section instantly activates the Loop 4 sensory harness to locate the exact source code generator in the project.
 
+### Loop 8: Conversational Context Interrogation & Prompt Co-Pilot
+- **The Problem:** Modern LLM prompts are massive 10,000–50,000+ token context windows. When a model hallucinates, violates constraints, or costs too much, developers cannot easily spot contradictory rules, needle-in-a-haystack data, or bloated tool schemas by manual inspection.
+- **The Meta AI Solution:** Meta Muse Spark 1.3 / Muse Wonder acts as an active, conversational **Prompt Co-Pilot** directly grounded in the captured context window and its Loop 6 semantic anatomy.
+- **Context Sensory Tools (No Token Overload):** Rather than naively dumping 50k tokens into every chat completion turn, Meta AI calls dedicated context sensory machine tools on demand:
+  - `search_context(query, sectionId?, targetCapture?, caseSensitive?)`: Fast multi-line regex and keyword search across prompt messages or targeted sections.
+  - `read_context_section(sectionId, startLine?, maxLines?)`: Paged verbatim inspection of specific context sections with bounds clamping.
+  - `inspect_code_template(sectionId)`: Connects the context slice back to source templates in the workspace and extracts dynamic variable slots (`{{ var }}`, `{var}`).
+  - `propose_template_patch(file, startLine, endLine, originalCode, replacementCode, explanation, tokenImpactEstimate?)`: Emits concrete, syntax-highlighted diffs to optimize prompt templates or resolve contradictions.
+  - `diff_captures()`: Analyzes regression, status differences, token shifts, and RAG divergences between two prompt captures.
+- **Interactive Scoping & 1-Click Diagnostics:**
+  - **Dynamic Scope Bar:** Lets developers interrogate globally (`[🌐 All Context]`), scope to a section (`[🎯 Section msg-3: RAG Grounding ✕]`), or ask about highlighted text (`[✂️ Selection: 142 chars ✕]`).
+  - **1-Click Quick Action Chips:** `🔍 Detect Contradictions`, `✂️ Optimize & Prune`, `🛡️ Scan PII`, `💡 Explain Output`, and `🔄 Compare Captures`.
+  - **Closed-Loop Codebase Patching:** When Meta AI spots a prompt bug, it renders an inline **Proposed Patch Card** with syntax-highlighted diff viewer and a **`[✅ Apply Patch to Workspace]`** button. With one click, VS Code safely applies the patch via `vscode.workspace.applyEdit` with race-condition on-disk content verification.
+
 ---
 
 ## 3. Multi-Project Demonstration Suite
@@ -126,6 +140,7 @@ Context Tracker includes a comprehensive multi-framework demonstration suite (`t
 | **Telemetry Fixture A: 12-Turn Chat** | Multi-turn dialogue | 12-turn chat history + active query | Backlog collapser groups prior turns, calculates 68% token share, and Meta AI flags stale history advisory. |
 | **Telemetry Fixture B: RAG Context & Bridge** | Vector DB + RAG Injection | Postgres 16 replica docs + query | Decomposes composite message into RAG grounding + query, generates What/Why, and bridges to Loop 4 Trace in Code. |
 | **Telemetry Fixture C: Tool-Calling Schemas** | Function Calling Agent | Complex SQL & Charting JSON schemas | Identifies tool definitions, profiles schema capabilities, and validates 0ms/0-token fingerprint cache reuse. |
+| **Co-Pilot Fixture: RAG Interrogation & Patch** | Vector DB, RAG & Templates | Contradictory retrieval vs negative constraint | Meta AI interrogates context with sensory tools, diagnoses contradiction with RAG docs, calls `diff_captures`, proposes safe template patch, and applies to workspace. |
 
 ---
 
@@ -153,15 +168,21 @@ Context Tracker includes a comprehensive multi-framework demonstration suite (`t
   *Each section features **🎯 WHAT** and **💡 WHY** badges explaining the prompt engineering rationale. Notice this amber warning? Meta AI caught a context bloat advisory where older turns consume 68% of the token window!*  
   *And when we see an injected RAG chunk, one click on **'✨ Trace in Code'** activates Meta AI to reverse-engineer the prompt, search the codebase, and jump directly to the exact file and line number in the editor."*
 
-### **[1:55 - 2:35] Autonomous Self-Healing Diagnostic Loop ($5,000 Best Agentic Use-Case)**
+### **[1:55 - 2:30] Autonomous Prompt Co-Pilot, Contradiction Detection & 1-Click Codebase Patching**
+- **Visual:** In Context Tracker, click **"🔍 Detect Contradictions"** or click **"💬 Ask AI"** on a RAG Anatomy Card. Meta AI streams reasoning, calls `search_context` and `inspect_code_template`, detects the conflicting instruction, and pops an inline **Proposed Patch Card** with a syntax-highlighted diff preview. Click **"✅ Apply Patch to Workspace"**.
+- **Presenter (Voiceover):**  
+  *"Now for the ultimate feature: **Loop 8 Prompt Co-Pilot**. In real apps, prompts span 30,000+ tokens. When hallucinations occur, developers don't want to read a 50-page wall of text.*  
+  *We click **'🔍 Detect Contradictions'**. Meta AI uses context sensory tools to cross-reference our system instructions against retrieved RAG documents.*  
+  *Look at that: Meta AI flags that our system prompt strictly forbade mentioning competitor FooCorp, but our vector database retrieved a FooCorp pricing comparison!*  
+  *Even better, Meta AI inspects the source template and generates an actionable diff. We click **'Apply Patch to Workspace'**—and Context Tracker patches `support_agent.prompt` directly in VS Code. Observability to resolution in 10 seconds!"*
+
+### **[2:30 - 2:45] Autonomous Self-Healing Diagnostic Loop ($5,000 Best Agentic Use-Case)**
 - **Visual:** Switch to an app with an in-tree default fallback and an external `~/.config` file. Click "Start capture". Watchdog displays *"Listening idle · 0 requests received"*. Click **"Troubleshoot Connection"**.
 - **Presenter (Voiceover):**  
-  *"Now, what happens if an app has a hidden configuration hierarchy—for instance, a default URL in source code, but an active config file in the user's home directory?*  
-  *Our Traffic Watchdog detects that capture is armed but zero requests arrived. When we click 'Troubleshoot Connection', the Meta AI diagnostic loop engages.*  
-  *Meta AI analyzes the failure, recognizes that the in-code default was bypassed, queries `find_user_config_dirs`, and discovers the true active configuration in `~/.config/optimalx/config.json`.*  
-  *With one click on 'Switch connection', capture is redirected and prompts flow immediately. That's true autonomous self-healing."*
+  *"And if an application has a hidden configuration hierarchy, our Traffic Watchdog detects zero requests and engages the self-healing loop.*  
+  *Meta AI analyzes the silence, queries `find_user_config_dirs`, finds the real user config file, and hot-swaps the connection with one click."*
 
-### **[2:35 - 3:00] Security & Wrap-Up**
+### **[2:45 - 3:00] Security & Wrap-Up**
 - **Visual:** Click "Stop capture". Show `.env` and source code cleanly restored.
 - **Presenter (Voiceover):**  
   *"Security and privacy are non-negotiable. Context Tracker unconditionally redacts API keys and tokens before sending context to Meta AI, sandboxes all file operations, and automatically restores all modified files when capture stops.*  
@@ -173,8 +194,8 @@ Context Tracker includes a comprehensive multi-framework demonstration suite (`t
 
 | Criteria | Target | Implementation in Context Tracker |
 | :--- | :--- | :--- |
-| **Use of Meta AI Tooling (25%)** | Core Product Brain | Meta Muse Spark 1.3 & Muse Wonder drive all architecture analysis, sensory probing, self-healing diagnostics, semantic prompt attribution (Loop 4), and context window anatomy telemetry (Loop 6). |
-| **Best Agentic Use-Case ($5,000 Bonus)** | Full Multi-Step Autonomy | Autonomous multi-loop agent: connection reconnaissance, sensory environment grounding, self-healing watchdog, dynamic template reverse-engineering, and context window semantic profiling. |
-| **Speed to Connect & Attribute** | ≤ 2 turns | Parallel tool calling resolves endpoints and prompt template origins in 1–2 model turns without human configuration. |
-| **Reliability & Grounding** | 0 Hallucinations | Sensory tools (`detect_local_services`, `find_user_config_dirs`, `search_text`) ground the model in real local machine and codebase state. |
+| **Use of Meta AI Tooling (25%)** | Core Product Brain | Meta Muse Spark 1.3 & Muse Wonder drive all architecture analysis, sensory probing, self-healing diagnostics, semantic prompt attribution (Loop 4), context window anatomy telemetry (Loop 6), and conversational co-pilot context interrogation with direct codebase patching (Loop 8). |
+| **Best Agentic Use-Case ($5,000 Bonus)** | Full Multi-Step Autonomy | Autonomous multi-loop agent: connection reconnaissance, sensory environment grounding, self-healing watchdog, dynamic template reverse-engineering, context window semantic profiling, and closed-loop prompt debugging with workspace patching. |
+| **Speed to Connect & Attribute** | ≤ 2 turns | Parallel tool calling resolves endpoints, prompt template origins, and context contradictions in 1–2 model turns without human configuration. |
+| **Reliability & Grounding** | 0 Hallucinations | Sensory tools (`detect_local_services`, `find_user_config_dirs`, `search_text`, `read_context_section`, `inspect_code_template`) ground the model in real local machine, context window, and codebase state. |
 | **Security & Privacy** | 0 Secrets Leaked | Multi-layer regex redaction of keys/passwords, file sandboxing, and zero residual file footprint on stop. |

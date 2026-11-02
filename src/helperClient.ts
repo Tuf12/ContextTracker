@@ -1,15 +1,6 @@
-export type ChatMessage = {
-  role: "system" | "user" | "assistant" | "tool";
-  content: string | null;
-  tool_calls?: OpenAIToolCall[];
-  tool_call_id?: string;
-};
+import type { ChatMessage, OpenAIToolCall } from "./types";
 
-export type OpenAIToolCall = {
-  id: string;
-  type: "function";
-  function: { name: string; arguments: string };
-};
+export type { ChatMessage, OpenAIToolCall };
 
 export type OpenAITool = {
   type: "function";

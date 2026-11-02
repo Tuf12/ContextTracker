@@ -10,6 +10,7 @@ export type HelperTool<T> = {
 export type HarnessResult<T> = {
   finish: T | null;
   steps: number;
+  messages?: ChatMessage[];
 };
 
 export type HarnessEvent<T> =
@@ -27,10 +28,12 @@ export async function runHarness<T>(options: {
   onTool?: (name: string) => void;
   onEvent?: (event: HarnessEvent<T>) => void;
   allowDirectAnswer?: boolean;
+  history?: ChatMessage[];
 }): Promise<HarnessResult<T>> {
   const specs = options.tools.map(openAITool);
   const messages: ChatMessage[] = [
     { role: "system", content: options.system },
+    ...(options.history || []),
     { role: "user", content: options.user },
   ];
   let steps = 0;
@@ -42,7 +45,11 @@ export async function runHarness<T>(options: {
     }
     if (turn.toolCalls.length === 0) {
       if (options.allowDirectAnswer && turn.content && turn.content.trim()) {
-        return { finish: turn.content as unknown as T, steps };
+        return {
+          finish: turn.content as unknown as T,
+          steps,
+          messages: [...messages, { role: "assistant", content: turn.content }],
+        };
       }
       messages.push({ role: "assistant", content: turn.content });
       messages.push({ role: "user", content: "Call a tool. Finish by calling the finish tool." });
@@ -72,12 +79,12 @@ export async function runHarness<T>(options: {
       });
       if (outcome.finish !== undefined) {
         options.onEvent?.({ kind: "finish", finish: outcome.finish });
-        return { finish: outcome.finish, steps };
+        return { finish: outcome.finish, steps, messages };
       }
       messages.push({ role: "tool", content: outcome.content, tool_call_id: call.id });
     }
   }
-  return { finish: null, steps };
+  return { finish: null, steps, messages };
 }
 
 async function runCall<T>(

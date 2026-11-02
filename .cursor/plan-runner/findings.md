@@ -1,83 +1,151 @@
 # Plan run findings
 
-- Plan path: docs/plans/android-device-bridging.md
-- Started: Sunday, Nov 1, 2026, 1:35 PM (UTC-6)
+- Plan path: docs/plans/context-interrogation-chat.md
+- Started: Sunday, Nov 1, 2026, 6:11 PM (UTC-6)
 
-## Phase 1: Phase 1: ADB Sensory & Actuation Tools
+## Phase 1 Review
 
-### Discrepancies
+**Scope:** Plan §6 Phase 1 (1.1 types, 1.2 `src/contextTools.ts`, 1.3 `test/contextTools.test.cjs`).
 
-- Phase 1 deliverables are **uncommitted** (untracked `src/android.ts`, `test/android.test.cjs`; modified `src/types.ts`; not on `HEAD`).
-- Plan **§3.1 / 1.1** tool name `detect_android_environment` maps to **`detectAndroidEnvironment`** in `src/android.ts` (library API; Meta AI snake_case registration is Phase **2**).
-- Plan **§3.1** return schema has no **`summary`** field; **`AndroidEnvironment`** adds **`summary`** and **`AndroidDevice`** adds optional **`product`** (from `adb devices -l` parsing)—extras beyond the spec JSON.
-- Plan **§3.1** example **`defaultStrategy`** is only **`adb_reverse`**; types allow **`emulator_gateway`**, but **`detectAndroidEnvironment`** never sets **`emulator_gateway`** (only **`adb_reverse`** or **`none`**). Missing-adb copy mentions **`10.0.2.2:47321`** without setting **`emulator_gateway`**.
-- Plan **§3.1** **`available: true`** implies ADB readiness; implementation sets **`available: false`** when **`adb`** is missing **or** when **`adb devices -l`** exits non-zero ( **`adbPath`** may still be set on query failure).
-- **`detectAndroidEnvironment`** returns **all** parsed rows (e.g. **`unauthorized`**, **`offline`**); plan examples show only **`state: "device"`**—callers must filter (bridge does filter for **`device`**).
-- Plan **§5.1** port validation regex **`/^\d+$/`**; code exports **`PORT_REGEX = /^\d{1,5}$/`** but **`bridgeAndroidDevice`** validates ports with integer range checks instead—**`PORT_REGEX` is unused**.
-- Plan **1.2** teardown is **`adb reverse --remove tcp:47321`**; implemented as **`removeAndroidBridge`** (aligned). With no **`deviceSerial`**, a single global **`reverse --remove`** runs and **`removedDevices`** is **`["all"]`**—not per-device cleanup when multiple devices were bridged.
-- Plan **1.3 / §3.3** tool parameter is optional **`manifestPath`**; **`inspectAndroidSecurity(projectRoot, options?)`** requires an explicit **`projectRoot`** (appropriate for a library; harness wiring is Phase **2**).
-- Plan **1.3** manifest locations **`app/src/main/`**, **`src/main/`**; **`findManifestFile`** also checks project-root **`AndroidManifest.xml`** (broader discovery).
-- Plan **1.3** asks to parse domain exceptions for **`127.0.0.1`** and **`10.0.2.2`**; **`base-config cleartextTrafficPermitted="true"`** sets **`configAllowsLocalhost`** without requiring those domains (broader than loopback-only exceptions).
-- Plan **1.1** Windows path **`%LOCALAPPDATA%\Android\Sdk`**; **`findAdbPath`** uses **`~/AppData/Local/Android/Sdk`** (typical default, not **`process.env.LOCALAPPDATA`**).
-- Plan **1.1** also lists **`ANDROID_SDK_ROOT`**; unit tests cover **`ANDROID_HOME`** and **`PATH`** but not **`ANDROID_SDK_ROOT`** or homedir **`~/Android/Sdk`** discovery.
-- Plan **1.4** mocked process tests are present and pass (**`npm run compile`** + **`node --test test/android.test.cjs`**). Gaps vs implementation surface: no test for **`src/main/AndroidManifest.xml`**, bridge **`verification: "unverified"`**, **`ANDROID_SDK_ROOT`**, or malicious serial filtering in **`parseAdbDevicesOutput`**.
+**Verification (2026-11-01):** `npm run compile` succeeds; `node --test test/contextTools.test.cjs` — **12/12 pass**.
+
+### Requirements coverage
+
+| Plan item | Status | Notes |
+| :--- | :--- | :--- |
+| **1.1** `ContextScope` (`global`, `section`, `selection`, `compare`) | Met | `ContextScopeKind` + `ContextScope` in `src/types.ts`. |
+| **1.1** `ContextQueryResult`, `ContextSectionMatch`, `TemplatePatchProposal` | Met | Also `ContextSectionReadResult`, `CodeTemplateInspectionResult` (align with §3.2–3.3). |
+| **1.1** `HelperView` / `CaptureView` scope + thread state | Partial | Both have optional `activeScope`. `HelperView` adds `activePatch`, `threadCount` only—no thread message type or history fields. `CaptureView` has `sections?` but no per-capture chat buffer. |
+| **1.2** `search_context` | Met | Substring + `/regex/flags`, optional `sectionId`, `caseSensitive`, redaction via `redactText`. |
+| **1.2** `read_context_section` | Met | Paging, line clamp, `maxLines` cap 300, token estimate, redacted content. |
+| **1.2** `inspect_code_template` | Met | Reported spans + `CachedAttribution` fingerprint/quote; reads workspace slice when `projectPath` + file exist. |
+| **1.2** `propose_template_patch` | Met | Relative-path safety, optional workspace existence check, unified `diffPreview`, `patchId`. |
+| **1.3** Isolated unit tests | Met | No servers; mocked `fsImpl` where needed. |
+| **§7.1** Redaction on search/read | Implemented | Not covered by tests. |
+
+**Out of Phase 1 (expected):** `createContextTools` → `HelperTool` wrappers exist but are **not** registered in `src/app.ts` (Phase 2). `helperTools.ts` already imports `CaptureInput` / `getOrExtractSections` from `contextTools.ts` (early coupling).
+
+**Repo state:** Phase 1 artifacts still **uncommitted** (`??` `src/contextTools.ts`, `test/contextTools.test.cjs`, `docs/plans/context-interrogation-chat.md`; `M` `src/types.ts`).
+
+### Contract & design discrepancies
+
+- **Section IDs:** Plan §3 examples use `sec_0`, `sec_1`; `extractContextSections` emits `msg-*`, `history-*`, `msg-*-rag`, `msg-*-query`. Tools alias `msg-${sectionId}` and (read only) `history-${sectionId}`—**`sec_N` is not a first-class ID** and does not map to `msg-N`.
+- **Section lookup parity:** `readContextSection` accepts `history-${targetId}`; **`searchContext` and `inspectCodeTemplate` do not**, so the same alias can work for read but fail for search/inspect.
+- **`searchContext` cap:** Stops at **50** line matches; **`matchesCount` equals returned `matches.length`**, not total hits in the window (may under-report vs naive reading of §3.1).
+- **`inspect_code_template` — `runtimeInterpolations`:** Plan §3.3 shows **`value` / `count`** from runtime; implementation only discovers **variable names** from template syntax (`{{ }}`, `{ }`), not values from the capture.
+- **`templateType`:** `.prompt` files → **`prompt_file`**, not **`jinja2`**, even when content uses Jinja syntax (plan example uses `jinja2` for a `.prompt`-like template).
+- **`CodeTemplateInspectionResult.explanation`:** Extra field on attributed and unattributed paths; unattributed returns **`attributed: false`** (no throw)—reasonable but beyond strict §3.3 JSON.
+- **`TemplatePatchProposal`:** Return type includes full patch payload (`startLine`, `endLine`, `originalCode`, etc.), not only §3.4’s minimal four fields—fine for internal use / Phase 3 UI.
+- **`proposeTemplatePatch` validation:** Plan **1.2** wording suggests validation; Phase 1 only enforces **relative path**, optional **file exists** when `projectPath` is set, and **does not** verify `originalCode` against disk (§7.2 / Phase **4**).
+
+### Test coverage
+
+**Covered:** blank query; cross-section substring search; regex `/pattern/i`; `sectionId` scoping; read full section + paging; missing section error; inspect via **reported** span + mock FS; unattributed section; `generateDiffPreview`; path traversal rejection; full patch proposal; `createContextTools` registers four tools and runs **search**, **read**, **propose** handlers.
+
+**Gaps (recommended follow-ups, non-blocking for Phase 1 sign-off):**
+
+- `caseSensitive: true` vs default false
+- 50-match cap behavior
+- `redactText` on search/read snippets (API keys in content)
+- `inspectCodeTemplate` via **`CachedAttribution`** (fingerprint / quote), not only `reported`
+- `proposeTemplatePatch` rejects missing file when `projectPath` + `existsSync` false
+- `createContextTools` **`inspect_code_template`** handler smoke test
+- Telemetry-driven **`category`** override (`capture.telemetry.sections`)
+- Section alias edge cases (`sec_0`, `history-*` on search/inspect)
 
 ### User checks (deferred)
 
 - None.
 
-## Phase 2: Phase 2: Autonomous Meta AI Reasoning Integration
+## Phase 2: Phase 2: Autonomous Meta AI Grounding & Conversational Engine
+
+**Scope:** Plan §6 Phase 2 (2.1 `src/helperTools.ts`, 2.2 `src/app.ts` + `src/harness.ts`, 2.3 `test/contextCopilot.test.cjs`).
+
+**Verification (2026-11-01):** `npm run compile` succeeds; `node --test test/contextCopilot.test.cjs` — **6/6 pass**.
 
 ### Discrepancies
 
-- Phase 2 deliverables are **uncommitted** (modified `src/helperTools.ts`, `src/app.ts`, `test/helper.test.cjs`; depends on untracked Phase 1 `src/android.ts`; not on `HEAD`).
-- **`ADDRESS_SYSTEM` conflict:** Mobile section instructs proposing **`http://127.0.0.1:47321`** / **`http://10.0.2.2:47321`**, while **RULES & CONSTRAINTS** still says **never propose port 47321**; **`proposeAddress`** rejects any URL with port **47321** via **`isCaptureUrl`**—so the documented Android resolution path cannot succeed through **`propose_address`** as written (plan §4.1 copied into the prompt without reconciling existing capture rules).
-- **Phase 2.2 / plan §4.2 diagnostic grounding:** **`buildDiagnosticUserPrompt`** accepts **`androidEnvironment`**, **`securityFindings`**, and **`buildArtifactStatus`**, but **`src/app.ts`** watchdog/diagnostic harness still calls it with only **`failedFile`**, **`failedUrl`**, **`reason`**, **`projectName`**, and **`clues`**—no automatic ADB, cleartext, or APK timestamp injection at runtime.
-- **`buildDiagnosticUserPrompt`** adds optional Android **data** sections only; it does **not** include Android architecture rules, Gradle/Kotlin sourcing hierarchy, or emulator-vs-device routing text in the diagnostic prompt itself (Phase 2.2 bullet is only fully reflected in **`ADDRESS_SYSTEM`**, not diagnostics).
-- **`diagnosticTools`** is implemented as a thin alias of **`addressTools`** (tools registered as required); **`app.ts`** continues to call **`addressTools`** directly for diagnostics—behaviorally aligned, not a separate tool set.
-- **Phase 2.3 verification:** **`test/helper.test.cjs`** **`Meta Muse helper discovers Android Kotlin architecture and bridges device in 2 turns`** uses a **mocked** **`complete`** callback, not live **Muse Spark 1.3 / Muse Wonder** API calls; turn-2 comment expects **`bridge_android_device` + `propose_address`** but the mock only invokes **`propose_address`**; assertions do **not** require **`bridge_android_device`**; finish URL stays **`https://api.openai.com/v1`** rather than exercising Android recorder targeting or **`47321`** bridging flow from the plan.
-- Minor prompt wording vs plan §4.1: build-state bullet uses **“Always note in your reasoning”** instead of **“Always notify”**.
+- Phase 2 deliverables are **uncommitted** (modified `src/app.ts`, `src/helperTools.ts`, `src/harness.ts`, `src/derive.ts`, `src/types.ts`; untracked `test/contextCopilot.test.cjs`; depends on untracked Phase 1 `src/contextTools.ts`; not isolated on `HEAD` commits).
+- Plan **2.1** names **`CONTEXT_COPILOT_SYSTEM`**; implementation exposes **`buildContextCopilotSystem()`** (dynamic string builder, no exported constant with that name).
+- Plan **§4.1** section labels **`ACTIVE SCOPE:`** / **`CONTEXT SKELETON:`** / **`INSTRUCTIONS:`**; prompt uses markdown **`### ACTIVE SCOPE`** (and similar)—substance aligned, formatting differs.
+- **`totalTokens` in co-pilot system prompt** comes from **`estimateTokens` summed over raw messages** in `handleHelperMessage`; **`buildContextSkeleton`** totals **section `tokenEstimate`** values—the two counts can diverge for the same capture.
+- **Active scope is prompt-only:** `activeScope` is injected into **`buildContextCopilotSystem`** and quick-prompt suffixes use **`sectionId` only**; **`search_context` / `read_context_section` are not auto-scoped** to selection text or compare mode (selection/compare appear in system text only).
+- **`compare_captures` quick action** ( **`handleQuickAction` → `buildCompareCapturesPrompt`** ) sends a **single user query** with capture ids/token metadata; it does **not** attach a second capture skeleton, diff payload, or **`kind: "compare"`** scope wiring beyond whatever the webview passes—full cross-capture grounding is deferred to **Phase 4** in the plan.
+- **`setScope` / `clearScope` / `quickAction`** postMessage handlers live in **`app.ts`** (backend ready); **Phase 3** owns **`media/panel.js`** UI—expected split, but chip/scope UX is not verifiable in Phase 2 alone.
+- **`derive.ts`** adds **`sections`** to **`CaptureView`** (via **`extractContextSections`**)—supports scoping/UI but is **outside** the Phase 2 bullet list.
+- **`respond` finish** is recorded as activity **`kind: "thought"`**; **`propose_template_patch`** sets **`HelperView.activePatch`** plus **`kind: "finish"`** activity with **`diffPreview`** text—patch **card UI** is Phase **3**; stream wiring is partial vs §5.3 visuals.
+- **Contract tests (2.3)** use **mocked `complete`** callbacks, not live **Muse Spark 1.3 / Muse Wonder** API calls—aligned with plan wording (“mocked multi-section capture scenarios”) and §7.3 hardware-safe tests; harness scenarios use minimal system strings rather than full **`buildContextCopilotSystem`** output.
+- **Carry-over from Phase 1** (still affects co-pilot tool behavior): section id conventions (`sec_N` vs `msg-*`), search/inspect alias parity, etc.
 
 ### User checks (deferred)
 
-- **Plan §2.3 / Phase 2.3:** Exercise address discovery against a Kotlin/Android fixture with **live** Meta **Muse Spark 1.3** or **Muse Wonder** tool calling (parallel **`detect_android_environment`**, **`inspect_android_security`**, **`search_text`**, then **`bridge_android_device`** when a device is present)—not covered by mocked harness tests alone.
-- Confirm end-to-end behavior when the model follows Android prompt guidance: whether proposing **`127.0.0.1:47321`** is intended to bypass **`propose_address`** / file-verbatim rules, or whether **`ADDRESS_SYSTEM`** and **`proposeAddress`** need a product change (deferred product decision; note for manual validation after prompt/tool reconciliation).
+- None.
 
-## Phase 3: Phase 3: Traffic Watchdog & Self-Healing Diagnostics
+## Phase 3: Phase 3: Webview UI & Interactive Scoping Experience
+
+**Scope:** Plan §6 Phase 3 (3.1 `media/panel.js` / `media/panel.css`, 3.2 section & selection hooks, 3.3 patch cards + `applyPatch` wiring). UX reference §5.1–5.3.
+
+**Verification (2026-11-01):** `npm run compile` succeeds; `node --test test/contextCopilot.test.cjs` — **9/9 pass** (includes Phase 3 string-presence tests for `panel.js` / `panel.css`).
 
 ### Discrepancies
 
-- Phase 3 deliverables are **uncommitted** (untracked **`src/android.ts`** with **`checkAndroidBuildState`**, **`diagnoseAndroidConnection`**, **`removeAndroidBridge`**; modified **`src/app.ts`**, **`src/watchdog.ts`**, **`test/android.test.cjs`**, **`test/watchdog.test.cjs`**, **`src/types.ts`**; branch **ahead 4** of **`origin/main`**, not on isolated Phase-3-only commits).
-- **Phase 3.1 / architecture §2 “Stale binary check”:** **`checkAndroidBuildState`** compares **one** optional **`sourceFilePath`** (armed endpoint at capture time) against the newest **`.apk` / `.class` / `.jar`** under **`app/build/`** and **`build/`** trees—not a dedicated **`app-debug.apk`** path as in plan §4.2. Missing artifacts mark **`isStale: true`** even when no redirect timestamp exists yet.
-- **Phase 3.2 “When capture is silent after timeout, check ADB reverse … or APK older than rewrite”:** **`TrafficWatchdog.checkIdle`** only sets **`missedHint`** from **`projectContext`** flags frozen at **arm capture** (**`isStale`** from initial **`checkAndroidBuildState`**); it does **not** re-run ADB **`reverse --list`**, **`diagnoseAndroidConnection`**, or refresh artifact mtimes on silence. Architecture diagram **“Silence detection → Checks ADB tunnel heartbeat”** is **hint text only**, not an automated probe.
-- **Phase 3.2 automated / one-click fix:** **`diagnoseAndroidConnection`** may **`bridgeAndroidDevice`** (self-heal tunnel) and populate diagnostic prompt fields, but only when the user triggers **`troubleshootConnection`** → **`diagnoseConnection`** (helper connected). Idle timeout does **not** invoke repair or Meta AI; there is no Phase 3 UI one-click beyond existing **Troubleshoot Connection** (Phase **4** owns richer UX).
-- **`diagnoseAndroidConnection`** builds **`issues`** / **`remedies`** (cleartext, stale APK, missing ADB/device); **`app.ts`** passes only **`env`**, **`security`**, and **`buildState.summary`** into **`buildDiagnosticUserPrompt`**—aggregated issue/remedy lists and **`repairedBridge`** outcome are omitted from the model prompt (bridge repair is logged to output channel only).
-- **Stale APK without helper:** **`troubleshootConnection`** returns early with **`buildState.summary`** when **`isStale`** and helper is **not** connected—it does **not** run **`diagnoseAndroidConnection`** or attempt **`bridgeAndroidDevice`** in that path (ADB/cleartext checks deferred until helper is connected).
-- **Phase 3.3 teardown:** **`removeAndroidBridge()`** is hooked into **`stopCapture()`** and extension **`dispose()`** (aligned with plan **3.3** and §5.3 stop/deactivate). **`forgetAddress()`** closes the recorder and restores redirects but **does not** call **`removeAndroidBridge`** (residual tunnel if user disconnects address without **Stop capture**).
-- **Watchdog cleartext:** Android silence hints mention ADB bridging or stale APK only; **cleartext policy** is not reflected in **`missedHint`** (only via security section on full diagnostic).
-- **Tests:** Unit coverage for **`checkAndroidBuildState`**, **`diagnoseAndroidConnection`** (mock ADB), and Android **`TrafficWatchdog`** hints; **no** test that **`TrackerApp.stopCapture`** / **`dispose`** invoke teardown, and **no** integration test for silence-timeout → troubleshoot → bridge repair flow.
-- **Cross-phase (resolved here):** Phase 2 noted missing Android grounding in diagnostics at runtime; **`diagnoseConnection`** now calls **`diagnoseAndroidConnection`** and passes Android fields into **`buildDiagnosticUserPrompt`** when **`diag.isAndroid`**.
+- Phase 3 deliverables are **uncommitted** (modified **`media/panel.js`**, **`media/panel.css`**; **`applyPatch` / `setScope` / `clearScope` / `quickAction`** handlers in modified **`src/app.ts`** shared with Phases 2 and 4; Phase 3 tests live in untracked **`test/contextCopilot.test.cjs`**).
+- **Scope bar placement vs §5.1:** Plan places the scope pill **directly above the chat input**; UI renders **`helperScopeBar()`** under the helper console header **above the activity feed**, with quick chips **`helperQuickChips()`** between feed and input (Phase **3.1** “chat header” is closer, but still not above the input as in §5.1).
+- **Scope pill copy/format:** Global pill uses a **`Scope:`** prefix and **`All Context (~N tokens)`** rather than **`[🌐 All Context (N tokens)]`**. Section scope shows raw **`sectionId`** (e.g. **`msg-0`**, telemetry id) plus optional category text—not plan-style **`Section 2: RAG Grounding (3,400 tokens)`** with ordinal section numbers and per-section token counts in the pill.
+- **Compare scope (§5.1):** **`helperScopeBar`** renders **`kind: "compare"`** copy, but the webview **never posts `setScope` with `kind: "compare"`** when a comparison capture is selected; only the **`🔄 Compare Captures`** chip runs **`quickAction`** without setting compare scope (cross-capture UX still Phase **4**-leaning).
+- **Text selection hook (3.2 / §5.1):** Implementation uses a **`selection-floating-bar`** at the **top of the prompt column** (preview + **`💬 Ask Meta AI`**), not a small floating **`[💬 Ask about selection]`** pill anchored to the highlight. Selection requires **≥ 8 characters**; **`mouseup`** listens on **`document`**, so selections outside the prompt body can also trigger the bar.
+- **Patch card actions (3.3 / §5.3):** Color-coded unified-diff viewer and **`✅ Apply Patch to Workspace`** → **`applyPatch`** postMessage are present. **`[Open in Editor]`** is **not implemented**. Dismiss uses **`clearHelperActivity`**, which clears the **entire** helper activity log and **per-capture threads**, not only the patch card.
+- **Patch card data binding:** **`renderPatchCard`** reads **`state.helper.activePatch`** (single global patch) for file/impact/apply actions while diff text comes from the activity item—multiple patch **`finish`** entries could show **stale or mismatched** metadata if **`activePatch`** was cleared or superseded.
+- **Patch card detection:** **`finish`** items become patch cards only when **`item.detail.includes("--- a/")`**; diffs without that prefix fall back to a generic outcome row even when a patch was proposed.
+- **`handleApplyPatch` (backend):** Wired from the webview as required for **3.3**, but **`src/app.ts`** already performs **`vscode.workspace.applyEdit`** by line range **without** verifying **`originalCode`** against disk (plan **§7.2** / Phase **4.1** safety)—UI wiring is done; safe actuator semantics are not.
+- **Tests:** Phase 3 coverage is **static substring checks** on **`panel.js` / `panel.css`** plus a mock **`HelperView`** object—**no** webview/DOM or end-to-end **`setScope` → co-pilot** interaction tests.
+- **Minor label drift:** Quick chip **`🛡️ Scan PII`** vs plan **`🛡️ Scan PII & Leakage`**; helper chip row also includes pre–Loop 8 actions (**Find address**, **Probe local services**, **Troubleshoot connection**, telemetry/attribute)—beyond Phase **3.1**’s four diagnostics (+ compare).
 
 ### User checks (deferred)
 
-- On a real Android project with capture armed: let **`TrafficWatchdog`** hit idle timeout with zero requests and confirm **`missedHint`** shows ADB vs stale-APK messaging in the webview.
-- Disconnect or drop **`adb reverse`** (or replug USB) while capture is running, click **Troubleshoot Connection** with helper connected, and confirm tunnel re-establishment log and traffic recovery without manual **`adb reverse`**.
-- Edit a redirected Kotlin/config file without rebuilding, arm capture, and confirm stale detection (**output channel**, troubleshoot early message, and/or diagnostic prompt **Build Artifact State**).
-- **Stop capture** (and extension reload/deactivate) and verify **`adb reverse --list`** no longer includes **`tcp:47321`** for bridged devices.
+- None.
 
-## Phase 4: Phase 4: Webview UI & Developer Experience
+## Phase 4: Phase 4: Actionable Codebase Patching & Workspace Application
+
+**Scope:** Plan §6 Phase 4 (4.1 `applyTemplatePatch` + `originalCode` validation in `src/app.ts` / `src/contextTools.ts`, 4.2 comparative capture interrogation). Safety reference §7.2.
+
+**Verification (2026-11-01):** `npm run compile` succeeds; `node --test test/contextCopilot.test.cjs` — **13/13 pass** (includes four Phase 4 tests: `validateTemplatePatchContent`, `diffCaptures`, `diff_captures` / dual `search_context`, mocked comparative harness flow).
 
 ### Discrepancies
 
-- Phase 4 deliverables are **uncommitted** (modified **`media/panel.js`**, **`media/panel.css`**, **`src/app.ts`**, **`src/types.ts`**; **`AndroidViewInfo`** / **`RecorderView.mobile`** wiring; **`test/android.test.cjs`** contract test; branch **ahead 4** of **`origin/main`**).
-- **Phase 4.1 “webview header” device pill:** Plan examples **`📱 Pixel 8 (Bridged)`** / **`📱 Emulator (Bridged)`**; UI places the status pill in the **Capture card** header (alongside Active/Off), not the top-level **`Context Tracker`** header. Project card shows a separate static **“Android”** idle badge only.
-- **Device label semantics:** Pre-bridge **`detectAndroidEnvironment`** sets **`deviceLabel`** from **`model || serial`**; after **`bridgeAndroidDevice`**, **`armCapture`** overwrites **`deviceLabel`** with **`bridgedDevices` serials** (e.g. **`emulator-5554`**, not **“Emulator”** or a friendly **Pixel 8** name). Unbridged state shows **`(Active)`**, which the plan does not describe (plan copy is **“(Bridged)”** only).
-- **`stopCapture`** clears **`activeAndroidBridge`** but not **`activeAndroidDevice`**—pill can still show a device name with **Bridged → Active** after capture stops.
-- **Phase 4.2 cleartext card:** Non-blocking warning + copy control is implemented when **`isAndroid && !cleartextPermitted`** (Capture card expanded). Plan **4.2** asks for a copyable **`network_security_config.xml` snippet**; clipboard gets the full **`inspectAndroidSecurity` remediation** block (numbered steps, manifest attribute, and XML)—broader than the XML-only snippet in plan **§3.3**. **`securityRisk`** on **`AndroidViewInfo`** is populated but **not shown** in the webview.
-- **Cleartext visibility:** Warning appears for any loaded Android project while the Capture section is open, **not** gated on capture **running** or on traffic failure.
-- **Phase 4.3 build reminder:** Plan ties the indicator to capture on a **compiled Kotlin/Gradle** endpoint; UI shows the stale **banner** only when **`recorder.running && mobile.isStale`**, driven by **`checkAndroidBuildState`** (artifact mtime vs redirected file)—including **“no build artifacts found”** stale cases, and **no** reminder when the armed file is Kotlin/Gradle but artifacts are already newer than the redirect. Copy matches plan headline **“Re-run app in Android Studio”** but subtitle is hardcoded; **`staleSummary`** from the backend is unused in **`panel.js`**. Plan wording is **“badge”**; implementation is a warning banner card.
-- **Collapsed Capture card:** Device pill, cleartext card, and build reminder are **hidden** when the Capture card is collapsed (plan silent on collapse).
-- **Tests:** **`Phase 4 Webview UI integration: AndroidViewInfo contract conforms to schema`** validates the **`mobile`** payload shape only—**no** webview/DOM test for pill text, copy button, or banner visibility.
+- Phase 4 deliverables are **uncommitted** (modified **`src/app.ts`**, **`src/contextTools.ts`**, **`src/helperTools.ts`**; extended **`test/contextCopilot.test.cjs`**; relies on prior-phase **`media/panel.js`** pin/compare UI and **`applyPatch`** wiring).
+- **4.1 actuator — core requirements met:** **`applyTemplatePatch`** opens the workspace file, calls **`validateTemplatePatchContent`** against **`originalCode`** at **`startLine`–`endLine`**, aborts with VS Code error + chat **`kind: "status"`** activity on mismatch, otherwise **`vscode.workspace.applyEdit`**, **`document.save()`**, information notification, success activity, and **`push()`**.
+- **`patchId` handling:** Plan names **`applyTemplatePatch(patchId)`**; implementation also accepts **`patchCandidate`** from the webview (**`body.patch`**) and resolves **`const patch = patchCandidate || … this.activePatch`** — **`patchId` is not required to match** when **`activePatch`** is set (ignores stale/wrong id).
+- **Apply vs validate semantics:** Validation compares the **line slice** to **`originalCode`** (with CRLF normalization and **`.trim()`** on both sides); the edit still replaces the **full start/end lines** with **`replacementCode`**. Edge cases where **`originalCode`** is a strict substring of those lines could pass validation but replace whole lines — not spelled out in the plan.
+- **Confirmation UX:** Plan **4.1** asks for notification + chat feed confirmation (present). Plan **§5.3** “success confirmation badge” on the patch card is **not** added in Phase 4 (still a generic status activity row).
+- **4.1 test gap:** **`validateTemplatePatchContent`** is unit-tested in **`contextTools`**; **`applyTemplatePatch`** (VS Code APIs) has **no** automated test — expected for extension host behavior.
+- **4.2 comparative interrogation — largely met:** **`compareId` / `compare`** state, **`pinCapture`**, auto-compare previous capture on new ingress, side-by-side prompt columns when **`state.compare`**, **`createContextTools({ compareCapture })`** registers **`diff_captures`**, dual **`search_context`** via **`targetCapture`** (`primary` / `compare` / `both`), **`buildContextCopilotSystem`** injects comparison skeleton + **`diff_captures`** directive, and **`handleHelperMessage`** passes **`compareCapture`** into tools whenever a comparison capture is pinned.
+- **`search_context` API extension:** **`targetCapture`** and dual-result shapes (**`primary`/`compare`** for **`both`**, **`compareMatches`** for **`compare`**) are **not** in plan **§3.1** — supportive of 4.2 but undocumented in the spec.
+- **`read_context_section` / `inspect_code_template`:** Remain **primary-capture-only** even when a comparison capture is active — cross-capture Q&A depends on **`diff_captures`**, skeleton text, and scoped **`search_context`**, not verbatim section reads of the compare capture.
+- **Compare scope pill (§5.1 / 4.2 UX):** Pinning a comparison capture **does not** post **`setScope` with `kind: "compare"`**; compare mode is implicit via backend state and side-by-side viewer. **`helperScopeBar`** compare copy remains unreachable unless the webview sets compare scope manually.
+- **`compare_captures` quick chip:** Still sends **`buildCompareCapturesPrompt`** (ids/models/token totals only); full divergence grounding is via system **comparison skeleton** + tool calls, not the chip text itself (acceptable split but weaker than “cross-capture diffing” read literally on the chip alone).
+- **Carry-over:** Phase 1 section-id / alias issues; Phase 3 patch card **`[Open in Editor]`** missing; **`clearHelperActivity`** clears whole feed on dismiss.
+
+### User checks (deferred)
+
+- None.
+
+## Phase 5: Phase 5: Hackathon Showcase & Verification
+
+**Scope:** Plan §6 Phase 5 (5.1 `HACKATHON_SHOWCASE.md`, 5.2 Co-Pilot demonstration in `test/fixtures.test.cjs`).
+
+**Verification (2026-11-01):** `npm run compile` succeeds; `node --test --test-name-pattern "Context Interrogation" test/fixtures.test.cjs` — **1/1 pass** (11 sibling fixtures skipped by pattern).
+
+### Discrepancies
+
+- Phase 5 deliverables are **uncommitted** and **absent from `HEAD`**: modified **`HACKATHON_SHOWCASE.md`** (0 **`Loop 8`** mentions on committed tip) and **`test/fixtures.test.cjs`** (+254 lines); fixture imports **`buildContextSkeleton`**, **`buildContextCopilotSystem`**, **`buildDetectContradictionsPrompt`**, **`createContextTools`**, **`diffCaptures`**, **`validateTemplatePatchContent`** from compiled **`out/`** — depends on **untracked** **`src/contextTools.ts`** and prior-phase **`helperTools` / `app` / `media`** work not isolated on committed history.
+- **5.1 showcase — requirements largely met:** New **§2 Loop 8** subsection (problem, Meta AI co-pilot, four plan tools + **`diff_captures`**, scoping/chips, closed-loop patching), **§3** fixture table row **Co-Pilot Fixture: RAG Interrogation & Patch**, **§4** video segment **[1:55–2:30]** elevating Loop 8 as the demo climax, and **§5** rubric rows updated for Loop 8 / workspace patching.
+- **5.1 “interactive climax” framing:** Plan asks to document Loop 8 as the **interactive climax**; the doc still leads with Loops 1–7 in earlier sections—**climax emphasis is strongest in the 3-minute script**, not as a standalone capstone chapter.
+- **Showcase vs live product (carry-over):** Marketing copy describes ideal scope pills, **`🛡️ Scan PII`**, and **`vscode.workspace.applyEdit`** patching; Phase **3–4** findings still apply (**compare scope pill unreachable**, no **`[Open in Editor]`**, chip label drift, patch-card edge cases).
+- **5.2 fixture — plan trio covered with mocks:** Representative RAG capture (FooCorp rule vs retrieved docs), **`buildDetectContradictionsPrompt()`** user message, mocked **3-turn** harness invoking **`diff_captures`**, **`search_context`**, **`inspect_code_template`**, **`propose_template_patch`**, asserts final **`diffPreview`** and on-disk **`validateTemplatePatchContent`** + **`fs`** apply — aligned with **§7.3** hardware-safe testing, **not** live Muse API or extension-host **`applyTemplatePatch`**.
+- **5.2 scope beyond plan bullet:** Fixture also asserts **`buildContextSkeleton`**, **`buildContextCopilotSystem`** (incl. **`diff_captures`** directive), and **`diffCaptures`** status/RAG divergence — **not** listed in plan **5.2** but supports showcase table narrative.
+- **5.2 assertion gaps vs “context inquiry”:** No direct assertions on **`search_context`** match payloads, **`read_context_section`**, or **`inspect_code_template`** return bodies—only that the harness completes with a patch; **`read_context_section`** is not exercised in the scenario.
+- **Fixture table vs test apply path:** Showcase table says patch **“applies to workspace”**; the test applies via **`fs.writeFileSync`** after validation, not **`vscode.workspace.applyEdit`** (reasonable for unit fixture, differs from end-user path).
 
 ### User checks (deferred)
 

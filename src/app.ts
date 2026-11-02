@@ -4,8 +4,24 @@ import path from "path";
 import * as vscode from "vscode";
 import { deriveCapture, presentCapture } from "./derive";
 import { ANTHROPIC_ENV, applyEnv, OPENAI_ENV, proposedBases, readEnvStatus, restoreEnv } from "./env";
-import { completeChat, listHelperModels, META_HELPER_BASE, META_MODELS } from "./helperClient";
-import { ADDRESS_SYSTEM, addressTools, ATTRIBUTION_SYSTEM, attributionTools, buildAttributionUserPrompt, buildDiagnosticUserPrompt, buildHelperUserPrompt } from "./helperTools";
+import { completeChat, listHelperModels, META_HELPER_BASE, META_MODELS, type ChatMessage } from "./helperClient";
+import {
+  ADDRESS_SYSTEM,
+  addressTools,
+  ATTRIBUTION_SYSTEM,
+  attributionTools,
+  buildAttributionUserPrompt,
+  buildCompareCapturesPrompt,
+  buildContextCopilotSystem,
+  buildContextSkeleton,
+  buildDetectContradictionsPrompt,
+  buildDiagnosticUserPrompt,
+  buildExplainOutputPrompt,
+  buildHelperUserPrompt,
+  buildOptimizeContextPrompt,
+  buildScanPiiPrompt,
+} from "./helperTools";
+import { createContextTools, validateTemplatePatchContent } from "./contextTools";
 import { runHarness } from "./harness";
 import { panelHtml } from "./html";
 import { indexProject } from "./indexer";
@@ -17,6 +33,7 @@ import {
   applyTelemetryResponse,
   buildDeterministicTelemetry,
   buildTelemetrySkeleton,
+  estimateTokens,
   extractContextSections,
   globalTelemetryCache,
   parseTelemetryResponse,
@@ -39,6 +56,8 @@ import type {
   AttributedSpan,
   CachedAttribution,
   CaptureTelemetry,
+  ChatConversation,
+  ContextScope,
   HelperActivityItem,
   HelperActivityKind,
   ProjectIndex,
@@ -46,6 +65,7 @@ import type {
   ReportedSpan,
   RouteSettings,
   StoredCapture,
+  TemplatePatchProposal,
   ViewState,
 } from "./types";
 import { TrafficWatchdog } from "./watchdog";
@@ -96,17 +116,95 @@ export class TrackerApp {
   private addressOffer: AddressOffer | null = null;
   private activeAndroidDevice: string | null = null;
   private activeAndroidBridge = false;
+  private activeScope: ContextScope | undefined;
+  private activePatch: TemplatePatchProposal | null = null;
+  private readonly knownPatches = new Map<string, TemplatePatchProposal>();
+  private readonly appliedPatches = new Set<string>();
+  private readonly conversations = new Map<string, ChatConversation>();
+  private readonly conversationWritePromises = new Map<string, Promise<void>>();
   private helperRun = 0;
-  private helperActivity: HelperActivityItem[] = [];
   private panel: vscode.WebviewPanel | undefined;
   private statusTimer: ReturnType<typeof setTimeout> | undefined;
 
-  private recordActivity(item: {
-    kind: HelperActivityKind;
-    text: string;
-    toolName?: string;
-    detail?: string;
-  }): void {
+  private currentConversationKey(): string {
+    return this.selected?.id || "project";
+  }
+
+  private getConversation(key: string): ChatConversation {
+    let conv = this.conversations.get(key);
+    if (!conv) {
+      conv = {
+        id: key,
+        activity: [],
+        messages: [],
+        activePatch: null,
+        updatedAt: Date.now(),
+      };
+      this.conversations.set(key, conv);
+    }
+    return conv;
+  }
+
+  private async loadConversation(key: string): Promise<ChatConversation> {
+    const existing = this.conversations.get(key);
+    if (existing) {
+      return existing;
+    }
+    if (this.project) {
+      const stored = await this.store.getChat(this.project.path, key);
+      if (stored) {
+        if (stored.activePatch) {
+          this.knownPatches.set(stored.activePatch.patchId, stored.activePatch);
+        }
+        for (const item of stored.activity) {
+          if (item.patch) {
+            this.knownPatches.set(item.patch.patchId, item.patch);
+          }
+        }
+        this.conversations.set(key, stored);
+        return stored;
+      }
+    }
+    return this.getConversation(key);
+  }
+
+  private saveConversationAsync(key: string): Promise<void> {
+    if (!this.project) {
+      return Promise.resolve();
+    }
+    const conv = this.conversations.get(key);
+    if (!conv) {
+      return Promise.resolve();
+    }
+    const prior = this.conversationWritePromises.get(key) ?? Promise.resolve();
+    const next = prior
+      .then(async () => {
+        if (this.project) {
+          await this.store.saveChat(this.project.path, conv);
+        }
+      })
+      .catch((err) => {
+        this.output.appendLine(
+          `[Chat] Failed to persist chat ${key}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+    this.conversationWritePromises.set(key, next);
+    return next;
+  }
+
+  private recordActivity(
+    item: {
+      kind: HelperActivityKind;
+      text: string;
+      toolName?: string;
+      detail?: string;
+      patch?: TemplatePatchProposal;
+      patchApplied?: boolean;
+    },
+    targetKey?: string,
+  ): void {
+    const key = targetKey || this.currentConversationKey();
+    const conv = this.getConversation(key);
     const entry: HelperActivityItem = {
       id: `act-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       timestamp: Date.now(),
@@ -114,11 +212,22 @@ export class TrackerApp {
       text: item.text,
       toolName: item.toolName,
       detail: item.detail,
+      patch: item.patch,
+      patchApplied: item.patchApplied,
     };
-    this.helperActivity.push(entry);
-    if (this.helperActivity.length > 100) {
-      this.helperActivity.splice(0, this.helperActivity.length - 100);
+    if (item.patch) {
+      this.knownPatches.set(item.patch.patchId, item.patch);
+      conv.activePatch = item.patch;
+      if (key === this.currentConversationKey()) {
+        this.activePatch = item.patch;
+      }
     }
+    conv.activity.push(entry);
+    if (conv.activity.length > 100) {
+      conv.activity.splice(0, conv.activity.length - 100);
+    }
+    conv.updatedAt = Date.now();
+    void this.saveConversationAsync(key);
     this.push();
   }
 
@@ -316,10 +425,42 @@ export class TrackerApp {
       case "helperMessage":
         await this.handleHelperMessage(typeof body.text === "string" ? body.text : "");
         return;
-      case "clearHelperActivity":
-        this.helperActivity = [];
+      case "setScope":
+        if (body.scope && typeof body.scope === "object" && "kind" in body.scope && "label" in body.scope) {
+          this.activeScope = body.scope as ContextScope;
+          this.push();
+        }
+        return;
+      case "clearScope":
+        this.activeScope = this.selected ? { kind: "global", label: "All Context" } : undefined;
         this.push();
         return;
+      case "quickAction":
+        if (typeof body.action === "string") {
+          const scope = body.scope && typeof body.scope === "object" && "kind" in body.scope && "label" in body.scope ? (body.scope as ContextScope) : undefined;
+          await this.handleQuickAction(body.action, scope);
+        }
+        return;
+      case "applyPatch":
+        await this.applyTemplatePatch(
+          typeof body.patchId === "string" ? body.patchId : undefined,
+          body.patch && typeof body.patch === "object" ? (body.patch as TemplatePatchProposal) : undefined,
+        );
+        return;
+      case "clearHelperActivity": {
+        const key = this.currentConversationKey();
+        const conv = this.getConversation(key);
+        conv.activity = [];
+        conv.messages = [];
+        conv.activePatch = null;
+        conv.updatedAt = Date.now();
+        this.activePatch = null;
+        if (this.project) {
+          await this.store.removeChat(this.project.path, key);
+        }
+        this.push();
+        return;
+      }
       case "reindex":
         if (this.project) {
           await this.loadProject(this.project.path);
@@ -360,13 +501,22 @@ export class TrackerApp {
     this.selectedId = null;
     this.compare = null;
     this.compareId = null;
+    this.activeScope = undefined;
+    this.activePatch = null;
     this.helperNeeded = false;
     this.addressOffer = null;
     this.helperRun += 1;
     this.helperBusy = false;
     this.ignoredEndpoints.delete(resolved);
+    this.conversations.clear();
+    this.conversationWritePromises.clear();
     this.projectAttributions = await this.store.seedAttributionsFromCaptures(resolved);
-    this.summaries = await this.store.list(resolved);
+    const rawSummaries = await this.store.list(resolved);
+    const chatIds = new Set(await this.store.listChats(resolved));
+    this.summaries = rawSummaries.map((s) => ({
+      ...s,
+      chatCount: chatIds.has(s.id) ? 1 : 0,
+    }));
     if (this.summaries.length > 0 && !this.selectedId) {
       this.selectedId = this.summaries[0].id;
       const topCapture = await this.store.get(resolved, this.selectedId);
@@ -374,8 +524,12 @@ export class TrackerApp {
         this.applyCachedAttributions(topCapture);
         this.live.set(topCapture.id, topCapture);
         this.selected = topCapture;
+        this.activeScope = { kind: "global", label: "All Context" };
       }
     }
+    const currentKey = this.currentConversationKey();
+    const initialConv = await this.loadConversation(currentKey);
+    this.activePatch = initialConv.activePatch ?? null;
     await this.context.globalState.update(PROJECT_KEY, resolved);
     this.refreshStatus();
     this.push();
@@ -591,7 +745,7 @@ export class TrackerApp {
       kind: "status",
       text: "Starting autonomous search for model address with Meta AI...",
       detail: `Model: ${this.helperModel}`,
-    });
+    }, "project");
     this.push();
     try {
       const userPrompt = buildHelperUserPrompt(this.project.clues || [], {
@@ -624,21 +778,21 @@ export class TrackerApp {
             return;
           }
           if (event.kind === "thought") {
-            this.recordActivity({ kind: "thought", text: event.text });
+            this.recordActivity({ kind: "thought", text: event.text }, "project");
           } else if (event.kind === "tool_call") {
             this.recordActivity({
               kind: "tool_call",
               toolName: event.toolName,
               text: formatToolCall(event.toolName, event.args),
               detail: typeof event.args === "object" ? JSON.stringify(event.args, null, 2) : String(event.args),
-            });
+            }, "project");
           } else if (event.kind === "tool_result") {
             this.recordActivity({
               kind: "tool_result",
               toolName: event.toolName,
               text: summarizeToolResult(event.toolName, event.content),
               detail: event.content,
-            });
+            }, "project");
           }
         },
       });
@@ -651,7 +805,7 @@ export class TrackerApp {
         this.recordActivity({
           kind: "status",
           text: this.helperStatus,
-        });
+        }, "project");
       } else {
         this.addressOffer = result.finish;
         this.helperStatus = "The AI helper found a model address. Confirm it above to start capture.";
@@ -660,7 +814,7 @@ export class TrackerApp {
           kind: "finish",
           text: `Found model address ${this.addressOffer.url} in ${this.addressOffer.relativeFile}:${this.addressOffer.line}`,
           detail: this.addressOffer.reason,
-        });
+        }, "project");
       }
     } catch (error) {
       if (run !== this.helperRun) {
@@ -671,7 +825,7 @@ export class TrackerApp {
       this.recordActivity({
         kind: "status",
         text: this.helperStatus,
-      });
+      }, "project");
     } finally {
       if (run === this.helperRun) {
         this.helperBusy = false;
@@ -753,7 +907,7 @@ export class TrackerApp {
     this.recordActivity({
       kind: "status",
       text: diagnosing,
-    });
+    }, "project");
     this.push();
 
     try {
@@ -820,21 +974,21 @@ export class TrackerApp {
             return;
           }
           if (event.kind === "thought") {
-            this.recordActivity({ kind: "thought", text: event.text });
+            this.recordActivity({ kind: "thought", text: event.text }, "project");
           } else if (event.kind === "tool_call") {
             this.recordActivity({
               kind: "tool_call",
               toolName: event.toolName,
               text: formatToolCall(event.toolName, event.args),
               detail: typeof event.args === "object" ? JSON.stringify(event.args, null, 2) : String(event.args),
-            });
+            }, "project");
           } else if (event.kind === "tool_result") {
             this.recordActivity({
               kind: "tool_result",
               toolName: event.toolName,
               text: summarizeToolResult(event.toolName, event.content),
               detail: event.content,
-            });
+            }, "project");
           }
         },
       });
@@ -849,7 +1003,7 @@ export class TrackerApp {
         this.recordActivity({
           kind: "status",
           text: this.helperStatus,
-        });
+        }, "project");
         return null;
       }
 
@@ -865,7 +1019,7 @@ export class TrackerApp {
         kind: "finish",
         text: `Diagnosed active runtime configuration in ${offer.relativeFile} line ${offer.line}`,
         detail: offer.explanation,
-      });
+      }, "project");
       return offer;
     } catch (error) {
       if (run !== this.helperRun) {
@@ -876,7 +1030,7 @@ export class TrackerApp {
       this.recordActivity({
         kind: "status",
         text: this.helperStatus,
-      });
+      }, "project");
       return null;
     } finally {
       if (run === this.helperRun) {
@@ -937,7 +1091,7 @@ export class TrackerApp {
     this.recordActivity({
       kind: "status",
       text: working,
-    });
+    }, captureId);
     this.push();
 
     try {
@@ -975,21 +1129,21 @@ export class TrackerApp {
             return;
           }
           if (event.kind === "thought") {
-            this.recordActivity({ kind: "thought", text: event.text });
+            this.recordActivity({ kind: "thought", text: event.text }, captureId);
           } else if (event.kind === "tool_call") {
             this.recordActivity({
               kind: "tool_call",
               toolName: event.toolName,
               text: formatToolCall(event.toolName, event.args),
               detail: typeof event.args === "object" ? JSON.stringify(event.args, null, 2) : String(event.args),
-            });
+            }, captureId);
           } else if (event.kind === "tool_result") {
             this.recordActivity({
               kind: "tool_result",
               toolName: event.toolName,
               text: summarizeToolResult(event.toolName, event.content),
               detail: event.content,
-            });
+            }, captureId);
           }
         },
       });
@@ -1004,7 +1158,7 @@ export class TrackerApp {
         this.recordActivity({
           kind: "status",
           text: this.helperStatus,
-        });
+        }, captureId);
         return null;
       }
 
@@ -1075,7 +1229,7 @@ export class TrackerApp {
         kind: "finish",
         text: `Prompt attributed to ${attributed.file}:${attributed.startLine}–${attributed.endLine} (confidence: ${Math.round(attributed.confidence * 100)}%)`,
         detail: attributed.explanation,
-      });
+      }, captureId);
       this.push();
       return attributed;
     } catch (error) {
@@ -1087,7 +1241,7 @@ export class TrackerApp {
       this.recordActivity({
         kind: "status",
         text: this.helperStatus,
-      });
+      }, captureId);
       return null;
     } finally {
       if (run === this.helperRun) {
@@ -1114,11 +1268,10 @@ export class TrackerApp {
     const sections = extractContextSections(capture.messages);
     const totalTokens = sections.reduce((sum, s) => sum + s.tokenEstimate, 0);
 
-    const novelSections = sections.filter((s) => !globalTelemetryCache.has(s.fingerprint));
     const apiKey = await this.context.secrets.get(HELPER_SECRET);
     const hasHelper = Boolean(apiKey?.trim() && this.helperModel.trim());
 
-    if (novelSections.length === 0 || !hasHelper) {
+    if (!hasHelper) {
       const telemetry = buildDeterministicTelemetry(capture.id, capture.messages);
       capture.telemetry = telemetry;
       this.live.set(capture.id, capture);
@@ -1140,13 +1293,13 @@ export class TrackerApp {
         kind: "status",
         text: `📊 Context Telemetry: Analyzed ${sections.length} prompt sections (${topPct}% ${topCategory})`,
         detail: telemetry.composition.map((c) => `${c.categoryLabel}: ${c.tokens}t (${c.percentage}%)`).join(", "),
-      });
+      }, captureId);
       this.push();
       return telemetry;
     }
 
     const run = ++this.helperRun;
-    const working = `The AI helper is analyzing context telemetry for ${novelSections.length} novel section${novelSections.length > 1 ? "s" : ""} (${totalTokens} estimated tokens)…`;
+    const working = `The AI helper is analyzing prompt context anatomy and evaluating ${sections.length} sections (${totalTokens} estimated tokens)…`;
     this.helperBusy = true;
     this.helperStatus = working;
     this.lastEvent = working;
@@ -1156,11 +1309,11 @@ export class TrackerApp {
     this.recordActivity({
       kind: "status",
       text: working,
-    });
+    }, captureId);
     this.push();
 
     try {
-      const skeletonJson = buildTelemetrySkeleton(novelSections);
+      const skeletonJson = buildTelemetrySkeleton(sections);
       const userContent = [
         `Captured Prompt Messages: ${capture.messages.length}`,
         `Total Estimated Tokens: ${totalTokens}`,
@@ -1208,7 +1361,7 @@ export class TrackerApp {
         kind: "finish",
         text: finishText,
         detail: telemetry.composition.map((c) => `${c.categoryLabel}: ${c.tokens}t (${c.percentage}%)`).join("\n"),
-      });
+      }, captureId);
       this.push();
       return telemetry;
     } catch (error) {
@@ -1234,7 +1387,7 @@ export class TrackerApp {
       this.recordActivity({
         kind: "status",
         text: `⚠️ Telemetry fallback applied: ${errMsg}`,
-      });
+      }, captureId);
       this.push();
       return fallback;
     } finally {
@@ -1474,12 +1627,13 @@ export class TrackerApp {
     if (incoming.clientRequestId) {
       this.clientIds.set(incoming.clientRequestId, capture.id);
     }
-    if (this.selected && this.selectedId && this.selectedId !== capture.id) {
-      this.compare = this.selected;
-      this.compareId = this.selectedId;
-    }
+    this.compare = null;
+    this.compareId = null;
+    this.activeScope = { kind: "global", label: "All Context" };
     this.selected = capture;
     this.selectedId = capture.id;
+    const newConv = this.getConversation(capture.id);
+    this.activePatch = newConv.activePatch ?? null;
     await this.enqueue(capture.id, async () => {
       this.summaries = await this.store.add(capture);
     });
@@ -1537,10 +1691,17 @@ export class TrackerApp {
       }
     }
     this.selected = capture;
+    if (capture) {
+      this.activeScope = { kind: "global", label: "All Context" };
+    } else {
+      this.activeScope = undefined;
+    }
     if (this.compareId === id) {
       this.compareId = null;
       this.compare = null;
     }
+    const conv = await this.loadConversation(id);
+    this.activePatch = conv.activePatch ?? null;
     this.push();
   }
 
@@ -1570,6 +1731,9 @@ export class TrackerApp {
       return;
     }
     this.live.delete(id);
+    this.writes.delete(id);
+    this.conversations.delete(id);
+    this.conversationWritePromises.delete(id);
     this.summaries = await this.store.remove(this.project.path, id);
     if (this.compareId === id) {
       this.compareId = null;
@@ -1582,6 +1746,9 @@ export class TrackerApp {
         this.compareId = null;
         this.compare = null;
       }
+      const newKey = this.currentConversationKey();
+      const conv = await this.loadConversation(newKey);
+      this.activePatch = conv.activePatch ?? null;
     }
     this.push();
   }
@@ -1592,11 +1759,15 @@ export class TrackerApp {
     }
     await this.store.clear(this.project.path);
     this.live.clear();
+    this.conversations.clear();
+    this.conversationWritePromises.clear();
     this.summaries = [];
     this.selected = null;
     this.selectedId = null;
     this.compare = null;
     this.compareId = null;
+    this.activeScope = undefined;
+    this.activePatch = null;
     this.push();
   }
 
@@ -1686,21 +1857,146 @@ export class TrackerApp {
     this.statusTimer = setTimeout(() => this.refreshStatus(), 4000);
   }
 
+  public async applyTemplatePatch(patchId?: string, patchCandidate?: TemplatePatchProposal): Promise<boolean> {
+    const patch = patchCandidate || (patchId ? this.knownPatches.get(patchId) : null) || this.activePatch;
+    if (!patch || !this.project) {
+      vscode.window.showWarningMessage("No active template patch to apply.");
+      return false;
+    }
+    if (this.appliedPatches.has(patch.patchId)) {
+      vscode.window.showInformationMessage(`Patch for ${patch.file} has already been applied.`);
+      return true;
+    }
+    const fullPath = path.resolve(this.project.path, patch.file);
+    if (!fs.existsSync(fullPath)) {
+      vscode.window.showErrorMessage(`File '${patch.file}' was not found in project.`);
+      return false;
+    }
+    try {
+      const uri = vscode.Uri.file(fullPath);
+      const document = await vscode.workspace.openTextDocument(uri);
+      const fullText = document.getText();
+
+      const validation = validateTemplatePatchContent(
+        fullText,
+        patch.startLine,
+        patch.endLine,
+        patch.originalCode,
+      );
+
+      if (!validation.valid) {
+        vscode.window.showErrorMessage(
+          `Cannot apply patch to ${patch.file}: on-disk content at lines ${patch.startLine}-${patch.endLine} has changed since the patch was generated. Aborted to prevent race condition.`,
+        );
+        this.recordActivity({
+          kind: "status",
+          text: `Patch aborted for ${patch.file}:${patch.startLine}-${patch.endLine} (content changed on disk).`,
+        });
+        return false;
+      }
+
+      const startLineIdx = Math.max(0, patch.startLine - 1);
+      const endLineIdx = Math.max(startLineIdx, patch.endLine - 1);
+      const range = new vscode.Range(
+        new vscode.Position(startLineIdx, 0),
+        new vscode.Position(endLineIdx, document.lineAt(endLineIdx).text.length),
+      );
+      const edit = new vscode.WorkspaceEdit();
+      edit.replace(uri, range, patch.replacementCode);
+      const success = await vscode.workspace.applyEdit(edit);
+      if (success) {
+        await document.save();
+        this.appliedPatches.add(patch.patchId);
+        for (const conv of this.conversations.values()) {
+          let updated = false;
+          for (const act of conv.activity) {
+            if (act.patch?.patchId === patch.patchId) {
+              act.patchApplied = true;
+              updated = true;
+            }
+          }
+          if (conv.activePatch?.patchId === patch.patchId) {
+            conv.activePatch = null;
+            updated = true;
+          }
+          if (updated) {
+            void this.saveConversationAsync(conv.id);
+          }
+        }
+        if (this.activePatch?.patchId === patch.patchId) {
+          this.activePatch = null;
+        }
+        this.recordActivity({
+          kind: "status",
+          text: `Applied patch to ${patch.file}:${patch.startLine}-${patch.endLine}.`,
+        });
+        vscode.window.showInformationMessage(`Applied patch to ${patch.file}`);
+        this.push();
+        return true;
+      } else {
+        vscode.window.showErrorMessage(`Failed to apply patch to ${patch.file}`);
+        return false;
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      vscode.window.showErrorMessage(`Error applying patch: ${msg}`);
+      return false;
+    }
+  }
+
+  private async handleQuickAction(action: string, scope?: ContextScope): Promise<void> {
+    if (scope) {
+      this.activeScope = scope;
+    }
+    let query = "";
+    switch (action) {
+      case "detect_contradictions":
+        query = buildDetectContradictionsPrompt(this.activeScope);
+        break;
+      case "optimize_context":
+        query = buildOptimizeContextPrompt(this.activeScope);
+        break;
+      case "scan_pii":
+        query = buildScanPiiPrompt(this.activeScope);
+        break;
+      case "explain_output":
+        query = buildExplainOutputPrompt(this.selected?.reply);
+        break;
+      case "compare_captures":
+        if (this.selected && this.compare) {
+          const selectedTokens = this.selected.messages.reduce((sum, m) => sum + estimateTokens(m.content), 0);
+          const compareTokens = this.compare.messages.reduce((sum, m) => sum + estimateTokens(m.content), 0);
+          query = buildCompareCapturesPrompt(
+            { id: this.selected.id, model: this.selected.model, totalTokens: selectedTokens },
+            { id: this.compare.id, model: this.compare.model, totalTokens: compareTokens },
+          );
+        } else {
+          query = "Compare prompt captures: select a second capture to compare with the active capture.";
+        }
+        break;
+      default:
+        query = action;
+        break;
+    }
+    await this.handleHelperMessage(query);
+  }
+
   private async handleHelperMessage(userText: string): Promise<void> {
     const query = userText.trim();
     if (!query) {
       return;
     }
+    const targetKey = this.currentConversationKey();
     this.recordActivity({
       kind: "user",
       text: query,
-    });
+    }, targetKey);
 
     if (!this.project) {
       this.recordActivity({
         kind: "status",
         text: "Load a project first to use the AI helper.",
-      });
+      }, targetKey);
       return;
     }
 
@@ -1710,7 +2006,7 @@ export class TrackerApp {
       this.recordActivity({
         kind: "status",
         text: "Connect an AI helper and choose a Meta model first to interact with Meta AI.",
-      });
+      }, targetKey);
       this.push();
       return;
     }
@@ -1719,7 +2015,7 @@ export class TrackerApp {
       this.recordActivity({
         kind: "status",
         text: "The AI helper is currently busy with another operation.",
-      });
+      }, targetKey);
       return;
     }
 
@@ -1733,51 +2029,104 @@ export class TrackerApp {
     try {
       const projectPath = this.project.path;
       const baseTools = addressTools(projectPath);
-      const chatTools = [
-        ...baseTools,
-        {
-          name: "respond",
-          description: "Provide your final response or explanation to the user.",
-          parameters: {
-            type: "object",
-            properties: {
-              message: { type: "string", description: "Your final answer, explanation, or response to the user." },
-            },
-            required: ["message"],
+      const respondTool = {
+        name: "respond",
+        description: "Provide your final response, explanation, or advice directly to the user in clean Markdown.",
+        parameters: {
+          type: "object",
+          properties: {
+            message: { type: "string", description: "Your final answer, explanation, or response to the user." },
           },
-          run: (args: unknown) => {
-            const msg = args && typeof args === "object" && "message" in args ? String((args as any).message) : "Done.";
-            return {
-              content: "Response delivered to user.",
-              finish: { url: "", relativeFile: "", line: 0, reason: msg, explanation: msg },
-            };
-          },
+          required: ["message"],
         },
-      ];
+        run: (args: unknown) => {
+          const msg = args && typeof args === "object" && "message" in args ? String((args as any).message) : "Done.";
+          return {
+            content: "Response delivered to user.",
+            finish: { url: "", relativeFile: "", line: 0, reason: msg, explanation: msg },
+          };
+        },
+      };
 
-      const systemPrompt = [
-        "You are Context Tracker's autonomous AI assistant powered by Meta AI models (Muse Spark 1.3 and Muse Wonder).",
-        "You help developers understand, configure, and debug prompt capture and their LLM client code.",
-        `Current Project: ${this.project.name} (${this.project.path})`,
-        this.selected
-          ? `Currently Selected Prompt Capture: model=${this.selected.model}, provider=${this.selected.provider}, upstream=${this.selected.upstream}`
-          : "No prompt capture currently selected.",
-        "",
-        "You have access to sensory tools to inspect the developer's codebase and machine:",
-        "- detect_local_services: Probes local ports (Ollama on 11434, LM Studio on 1234, vLLM on 8000, etc.)",
-        "- find_user_config_dirs: Discovers user config directories (~/.config, ~/.<app>, %APPDATA%)",
-        "- search_text: Searches codebase for literal or regex patterns",
-        "- read_file: Reads project or user config files",
-        "- list_files: Lists directory contents",
-        "- propose_address: Proposes an active model address to connect capture",
-        "- respond: Delivers your final answer or explanation to the user",
-        "",
-        "Answer the user concisely and directly. If the user asks you to find an address, search code, or check ports, call the sensory tools first, then deliver your response using respond (or propose_address if proposing a connection).",
-      ].join("\n");
+      const conv = await this.loadConversation(targetKey);
+      const threadHistory = conv.messages || [];
+
+      let chatTools: Array<any>;
+      let systemPrompt: string;
+
+      if (this.selected) {
+        const compareSkeleton = this.compare ? buildContextSkeleton(this.compare) : undefined;
+        const compareTokens = this.compare
+          ? this.compare.messages.reduce((sum, m) => sum + estimateTokens(m.content), 0)
+          : undefined;
+
+        const contextTools = createContextTools({
+          capture: this.selected,
+          compareCapture: this.compare || undefined,
+          projectPath: this.project.path,
+          attributions: this.projectAttributions,
+          onPatchProposed: (patch) => {
+            this.activePatch = patch;
+            this.knownPatches.set(patch.patchId, patch);
+            conv.activePatch = patch;
+            this.recordActivity({
+              kind: "finish",
+              text: `Proposed template patch for ${patch.file}:${patch.startLine}-${patch.endLine} (${patch.tokenImpactEstimate || "optimized"})`,
+              detail: patch.diffPreview,
+              patch: patch,
+              patchApplied: false,
+            }, targetKey);
+          },
+        });
+        chatTools = [
+          ...contextTools,
+          ...baseTools,
+          respondTool,
+        ];
+        const skeleton = buildContextSkeleton(this.selected);
+        const selectedTokens = this.selected.messages.reduce((sum, m) => sum + estimateTokens(m.content), 0);
+        systemPrompt = buildContextCopilotSystem({
+          projectName: this.project.name,
+          projectPath: this.project.path,
+          captureId: this.selected.id,
+          model: this.selected.model,
+          provider: this.selected.provider,
+          totalTokens: selectedTokens,
+          scope: this.activeScope,
+          contextSkeleton: skeleton,
+          compareId: this.compare?.id,
+          compareModel: this.compare?.model,
+          compareTotalTokens: compareTokens,
+          compareSkeleton: compareSkeleton,
+        });
+      } else {
+        chatTools = [
+          ...baseTools,
+          respondTool,
+        ];
+        systemPrompt = [
+          "You are Context Tracker's autonomous AI assistant powered by Meta AI models (Muse Spark 1.3 and Muse Wonder).",
+          "You help developers understand, configure, and debug prompt capture and their LLM client code.",
+          `Current Project: ${this.project.name} (${this.project.path})`,
+          "No prompt capture currently selected.",
+          "",
+          "You have access to sensory tools to inspect the developer's codebase and machine:",
+          "- detect_local_services: Probes local ports (Ollama on 11434, LM Studio on 1234, vLLM on 8000, etc.)",
+          "- find_user_config_dirs: Discovers user config directories (~/.config, ~/.<app>, %APPDATA%)",
+          "- search_text: Searches codebase for literal or regex patterns",
+          "- read_file: Reads project or user config files",
+          "- list_files: Lists directory contents",
+          "- propose_address: Proposes an active model address to connect capture",
+          "- respond: Delivers your final answer or explanation to the user",
+          "",
+          "Answer the user concisely and directly. If the user asks you to find an address, search code, or check ports, call the sensory tools first, then deliver your response using respond (or propose_address if proposing a connection).",
+        ].join("\n");
+      }
 
       const result = await runHarness({
         system: systemPrompt,
         user: query,
+        history: threadHistory,
         tools: chatTools,
         stepCap: 10,
         allowDirectAnswer: true,
@@ -1798,52 +2147,79 @@ export class TrackerApp {
         onEvent: (event) => {
           if (run !== this.helperRun) return;
           if (event.kind === "thought") {
-            this.recordActivity({ kind: "thought", text: event.text });
+            this.recordActivity({ kind: "thought", text: event.text }, targetKey);
           } else if (event.kind === "tool_call") {
             this.recordActivity({
               kind: "tool_call",
               toolName: event.toolName,
               text: formatToolCall(event.toolName, event.args),
               detail: typeof event.args === "object" ? JSON.stringify(event.args, null, 2) : String(event.args),
-            });
+            }, targetKey);
           } else if (event.kind === "tool_result") {
             this.recordActivity({
               kind: "tool_result",
               toolName: event.toolName,
               text: summarizeToolResult(event.toolName, event.content),
               detail: event.content,
-            });
+            }, targetKey);
           }
         },
       });
 
       if (run !== this.helperRun) return;
 
+      if (result.messages && result.messages.length > 0) {
+        const nonSystem = result.messages.filter((m) => m.role !== "system");
+        conv.messages = nonSystem.slice(-16);
+      }
+
       if (result.finish) {
-        if (result.finish.url && result.finish.relativeFile) {
-          this.addressOffer = result.finish;
+        const fin = result.finish as any;
+        if (fin.patchId && fin.diffPreview) {
+          const patch = fin as TemplatePatchProposal;
+          this.activePatch = patch;
+          this.knownPatches.set(patch.patchId, patch);
+          conv.activePatch = patch;
+          this.helperStatus = `Proposed patch for ${patch.file}:${patch.startLine}-${patch.endLine}.`;
+          this.recordActivity({
+            kind: "finish",
+            text: `Proposed template patch for ${patch.file}:${patch.startLine}-${patch.endLine} (${patch.tokenImpactEstimate || "optimized"})`,
+            detail: patch.diffPreview,
+            patch: patch,
+            patchApplied: false,
+          }, targetKey);
+          if (patch.explanation) {
+            this.recordActivity({
+              kind: "assistant",
+              text: `### Proposed Template Patch\n\n${patch.explanation}\n\nYou can review the diff above and apply it with one click, or let me know if you would prefer a different approach.`,
+            }, targetKey);
+          }
+        } else if (fin.url && fin.relativeFile) {
+          this.addressOffer = fin as AddressOffer;
           this.helperStatus = "The AI helper found a model address. Confirm it to start capture.";
           this.recordActivity({
             kind: "finish",
-            text: `Proposed address ${result.finish.url} in ${result.finish.relativeFile}:${result.finish.line}`,
-            detail: result.finish.reason || result.finish.explanation,
-          });
-        } else if (result.finish.explanation || result.finish.reason) {
-          const reply = result.finish.explanation || result.finish.reason;
+            text: `Proposed address ${fin.url} in ${fin.relativeFile}:${fin.line}`,
+            detail: fin.reason || fin.explanation,
+          }, targetKey);
+        } else if (fin.explanation || fin.reason || typeof fin === "string") {
+          const reply = typeof fin === "string" ? fin : (fin.explanation || fin.reason);
           this.recordActivity({
-            kind: "thought",
+            kind: "assistant",
             text: reply,
-          });
+          }, targetKey);
           this.helperStatus = "AI helper finished.";
         }
       }
+      conv.updatedAt = Date.now();
+      await this.saveConversationAsync(targetKey);
     } catch (error) {
       if (run !== this.helperRun) return;
       this.helperStatus = error instanceof Error ? error.message : "AI helper communication failed.";
       this.recordActivity({
         kind: "status",
         text: this.helperStatus,
-      });
+      }, targetKey);
     } finally {
       if (run === this.helperRun) {
         this.helperBusy = false;
@@ -1859,6 +2235,9 @@ export class TrackerApp {
     const selected = this.selected && this.project && path.resolve(this.selected.projectPath) === this.project.path
       ? presentCapture(deriveCapture(this.selected, this.index))
       : null;
+    if (selected) {
+      selected.activeScope = this.activeScope;
+    }
     const compare = this.compare && this.project && path.resolve(this.compare.projectPath) === this.project.path
       ? presentCapture(deriveCapture(this.compare, this.index))
       : null;
@@ -1879,6 +2258,14 @@ export class TrackerApp {
         staleSummary: buildState.summary,
       };
     }
+
+    const currentKey = this.currentConversationKey();
+    const currentConv = this.getConversation(currentKey);
+    const enrichedSummaries = this.summaries.map((summary) => {
+      const conv = this.conversations.get(summary.id);
+      const count = conv ? conv.activity.length : (summary.chatCount ?? 0);
+      return count > 0 ? { ...summary, chatCount: count } : summary;
+    });
 
     return {
       project: this.project,
@@ -1907,10 +2294,14 @@ export class TrackerApp {
         busy: this.helperBusy,
         status: this.helperStatus,
         offer: this.addressOffer,
-        activity: this.helperActivity,
+        activity: currentConv.activity,
+        activeScope: this.activeScope,
+        activePatch: currentConv.activePatch ?? this.activePatch,
+        threadCount: (currentConv.messages || []).length,
+        conversationId: currentKey,
       },
       env: this.project ? readEnvStatus(this.project.path, url, this.backupDir) : null,
-      captures: this.summaries,
+      captures: enrichedSummaries,
       selectedId: selected ? this.selectedId : null,
       selected,
       compareId: compare ? this.compareId : null,
@@ -1919,7 +2310,54 @@ export class TrackerApp {
   }
 
   private push(): void {
-    const state = this.buildState();
+    let state: ViewState;
+    try {
+      state = this.buildState();
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "Context Tracker failed to build panel state.";
+      this.output.appendLine(`[UI] ${message}`);
+      this.lastEvent = "The panel could not refresh. Open the log for details.";
+      const errKey = this.currentConversationKey();
+      state = {
+        project: this.project,
+        recorder: {
+          running: Boolean(this.server),
+          url: `http://127.0.0.1:${this.server?.port ?? CAPTURE_PORT}`,
+          openaiBase: null,
+          anthropicBase: null,
+          mode: this.route.mode,
+          customUpstream: this.route.customUpstream,
+          error: this.recorderError,
+          lastEvent: this.lastEvent,
+          found: this.foundLabel,
+          trafficState: this.watchdog.getState(),
+          requestCount: this.watchdog.getRequestCount(),
+          uptimeSeconds: this.watchdog.getUptimeSeconds(),
+          missedHint: this.watchdog.getMissedHint(),
+        },
+        helper: {
+          model: this.helperModel,
+          choices: META_MODELS,
+          keySaved: this.helperKeySaved,
+          connectOpen: this.helperConnectOpen,
+          needed: this.helperNeeded && !this.server,
+          busy: this.helperBusy,
+          status: this.helperStatus,
+          offer: this.addressOffer,
+          activity: this.getConversation(errKey).activity,
+          activeScope: this.activeScope,
+          activePatch: this.activePatch,
+          threadCount: 0,
+          conversationId: errKey,
+        },
+        env: null,
+        captures: this.summaries,
+        selectedId: null,
+        selected: null,
+        compareId: null,
+        compare: null,
+      };
+    }
     for (const webview of this.views) {
       void webview.postMessage({ type: "state", state });
     }
@@ -1959,6 +2397,21 @@ function helperStepLabel(name: string): string {
   }
   if (name === "analyze_telemetry") {
     return "The AI helper is analyzing prompt context anatomy and token budget.";
+  }
+  if (name === "search_context") {
+    return "The AI helper is searching across prompt context sections.";
+  }
+  if (name === "read_context_section") {
+    return "The AI helper is reading verbatim lines from a context section.";
+  }
+  if (name === "inspect_code_template") {
+    return "The AI helper is inspecting the source code template for this section.";
+  }
+  if (name === "propose_template_patch") {
+    return "The AI helper is preparing a template patch proposal.";
+  }
+  if (name === "respond") {
+    return "The AI helper is formulating its response.";
   }
   return "The AI helper is connecting this project to capture.";
 }
@@ -2000,6 +2453,23 @@ function formatToolCall(name: string, args: unknown): string {
   }
   if (name === "attribute_prompt") {
     return `attribute_prompt("${record.file || ""}:${record.startLine || 1}–${record.endLine || 1}")`;
+  }
+  if (name === "search_context") {
+    const q = record.query || "";
+    const sec = record.sectionId ? ` in ${record.sectionId}` : "";
+    return `search_context("${q}"${sec})`;
+  }
+  if (name === "read_context_section") {
+    return `read_context_section("${record.sectionId || ""}", L${record.startLine || 1}–${record.maxLines || 100})`;
+  }
+  if (name === "inspect_code_template") {
+    return `inspect_code_template("${record.sectionId || ""}")`;
+  }
+  if (name === "propose_template_patch") {
+    return `propose_template_patch("${record.file || ""}:${record.startLine || 1}–${record.endLine || 1}")`;
+  }
+  if (name === "respond") {
+    return "respond()";
   }
   return `${name}(${JSON.stringify(args)})`;
 }

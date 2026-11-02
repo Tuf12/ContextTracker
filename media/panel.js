@@ -1,9 +1,14 @@
 let asideScrollTop = 0;
+let cardsScrollTop = 0;
+let feedScrollTop = 0;
 let detailScrollTop = 0;
 
 (function () {
   const vscode = acquireVsCodeApi();
   const app = document.getElementById("app");
+  if (!app) {
+    throw new Error("Context Tracker panel root (#app) is missing.");
+  }
   let state = null;
   let confirmClear = false;
   let selectedSpan = null;
@@ -13,11 +18,48 @@ let detailScrollTop = 0;
   let helperKey = "";
   let helperMessageInput = "";
   let activeSidebarTab = "helper"; // "helper" | "prompt"
+
+  const savedLayout = (function () {
+    try {
+      return (vscode && vscode.getState && vscode.getState()) || {};
+    } catch {
+      return {};
+    }
+  })();
+
+  let sidebarWidth = typeof savedLayout.sidebarWidth === "number" ? savedLayout.sidebarWidth : 420;
+  let sidebarCardsHeight = typeof savedLayout.sidebarCardsHeight === "number" ? savedLayout.sidebarCardsHeight : 260;
+  let isSidebarCollapsed = Boolean(savedLayout.isSidebarCollapsed);
+  let mainViewTab = savedLayout.mainViewTab === "chat" ? "chat" : "prompt"; // "prompt" | "chat"
+  let quickActionsCollapsed = Boolean(savedLayout.quickActionsCollapsed);
   let collapsed = {
-    project: false,
-    recorder: false,
-    capture: false,
+    project: Boolean(savedLayout.collapsedProject),
+    recorder: Boolean(savedLayout.collapsedRecorder),
+    capture: Boolean(savedLayout.collapsedCapture),
   };
+
+  const expandedToolSchemas = new Set();
+  const showRawToolsJson = new Map();
+
+  function saveLayoutState(updates) {
+    try {
+      const prev = (vscode && vscode.getState && vscode.getState()) || {};
+      vscode.setState({
+        ...prev,
+        sidebarWidth,
+        sidebarCardsHeight,
+        isSidebarCollapsed,
+        mainViewTab,
+        quickActionsCollapsed,
+        collapsedProject: collapsed.project,
+        collapsedRecorder: collapsed.recorder,
+        collapsedCapture: collapsed.capture,
+        ...updates,
+      });
+    } catch {
+      // ignore
+    }
+  }
 
   const SPAN_EXAMPLE = [
     "{",
@@ -35,6 +77,24 @@ let detailScrollTop = 0;
 
   let attributingMessage = null;
   let copiedSecuritySnippet = false;
+  let activeSelection = "";
+
+  document.addEventListener("mouseup", () => {
+    if (document.body.classList.contains("is-resizing-col") || document.body.classList.contains("is-resizing-row")) {
+      return;
+    }
+    setTimeout(() => {
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed) {
+        return;
+      }
+      const text = sel.toString().trim();
+      if (state && text.length >= 8 && text !== activeSelection) {
+        activeSelection = text;
+        render();
+      }
+    }, 50);
+  });
 
   window.addEventListener("message", (event) => {
     if (!event.data || event.data.type !== "state") {
@@ -48,6 +108,7 @@ let detailScrollTop = 0;
   });
 
   vscode.postMessage({ type: "ready" });
+  render();
 
   function render() {
     const scroller = document.scrollingElement;
@@ -55,9 +116,17 @@ let detailScrollTop = 0;
       scrollTop = scroller.scrollTop;
     }
     const existingAside = document.querySelector(".layout-editor > aside");
+    const existingCards = document.getElementById("sidebar-cards");
+    const existingFeed = document.getElementById("helper-feed");
     const existingDetail = document.getElementById("detail");
     if (existingAside) {
       asideScrollTop = existingAside.scrollTop;
+    }
+    if (existingCards) {
+      cardsScrollTop = existingCards.scrollTop;
+    }
+    if (existingFeed) {
+      feedScrollTop = existingFeed.scrollTop;
     }
     if (existingDetail) {
       detailScrollTop = existingDetail.scrollTop;
@@ -80,6 +149,18 @@ let detailScrollTop = 0;
       if (newAside) {
         newAside.scrollTop = asideScrollTop;
       }
+      const newCards = document.getElementById("sidebar-cards");
+      if (newCards) {
+        newCards.scrollTop = cardsScrollTop;
+      }
+      const newFeed = document.getElementById("helper-feed");
+      if (newFeed) {
+        if (!sameCapture || (state.helper && state.helper.busy)) {
+          newFeed.scrollTop = newFeed.scrollHeight;
+        } else {
+          newFeed.scrollTop = feedScrollTop;
+        }
+      }
       const newDetail = document.getElementById("detail");
       if (newDetail && sameCapture) {
         newDetail.scrollTop = detailScrollTop;
@@ -90,14 +171,98 @@ let detailScrollTop = 0;
           input.focus();
         }
       }
-      const feed = document.getElementById("helper-feed");
-      if (feed && state.helper && state.helper.busy) {
-        feed.scrollTop = feed.scrollHeight;
-      }
     } catch (error) {
       app.replaceChildren();
       app.append(h("p", { class: "banner" }, error instanceof Error ? error.message : "The prompt view failed to draw."));
     }
+  }
+
+  function toggleSidebar() {
+    isSidebarCollapsed = !isSidebarCollapsed;
+    saveLayoutState({ isSidebarCollapsed });
+    render();
+  }
+
+  function startHorizontalResize(e) {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = sidebarWidth;
+    const gutter = document.getElementById("gutter-col");
+    if (gutter) gutter.classList.add("dragging");
+    document.body.classList.add("is-resizing-col");
+
+    function onMouseMove(moveEvent) {
+      moveEvent.preventDefault();
+      const delta = moveEvent.clientX - startX;
+      const windowWidth = window.innerWidth || document.documentElement.clientWidth || 1000;
+      const minW = 260;
+      const maxW = Math.max(minW, windowWidth - 280);
+      const newWidth = Math.max(minW, Math.min(maxW, Math.round(startWidth + delta)));
+      sidebarWidth = newWidth;
+      const asideEl = document.getElementById("sidebar-panel");
+      if (asideEl) {
+        asideEl.style.width = newWidth + "px";
+      }
+    }
+
+    function onMouseUp() {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+      document.body.classList.remove("is-resizing-col");
+      if (gutter) gutter.classList.remove("dragging");
+      saveLayoutState({ sidebarWidth });
+    }
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+  }
+
+  function startVerticalResize(e) {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startHeight = sidebarCardsHeight;
+    const gutter = document.getElementById("gutter-row");
+    if (gutter) gutter.classList.add("dragging");
+    document.body.classList.add("is-resizing-row");
+
+    function onMouseMove(moveEvent) {
+      moveEvent.preventDefault();
+      const delta = moveEvent.clientY - startY;
+      const asideEl = document.getElementById("sidebar-panel");
+      const asideHeight = asideEl ? asideEl.clientHeight : 800;
+      const minH = 50;
+      const maxH = Math.max(minH, asideHeight - 140);
+      const newHeight = Math.max(minH, Math.min(maxH, Math.round(startHeight + delta)));
+      sidebarCardsHeight = newHeight;
+      const cardsEl = document.getElementById("sidebar-cards");
+      if (cardsEl) {
+        cardsEl.style.flex = "0 1 " + newHeight + "px";
+        cardsEl.style.maxHeight = newHeight + "px";
+      }
+    }
+
+    function onMouseUp() {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+      document.body.classList.remove("is-resizing-row");
+      if (gutter) gutter.classList.remove("dragging");
+      saveLayoutState({ sidebarCardsHeight });
+    }
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+  }
+
+  function resetHorizontalResize() {
+    sidebarWidth = 420;
+    saveLayoutState({ sidebarWidth: 420 });
+    render();
+  }
+
+  function resetVerticalResize() {
+    sidebarCardsHeight = 260;
+    saveLayoutState({ sidebarCardsHeight: 260 });
+    render();
   }
 
   function ensureLocals() {
@@ -135,14 +300,100 @@ let detailScrollTop = 0;
   }
 
   function editorShell() {
-    return h("div", { class: "layout layout-editor", id: "shell" },
-      h("aside", { class: "stack sidebar-panel" },
-        header("editor"),
-        projectCard(),
-        recorderCard(),
-        captureCard(),
-        helperConsole({ inAside: true })),
-      h("main", { class: "detail", id: "detail" }, detail()));
+    const isChatInMain = mainViewTab === "chat";
+
+    const cardsContainer = h("div", {
+      class: "sidebar-cards-container",
+      id: "sidebar-cards",
+      style: `flex: 0 1 ${sidebarCardsHeight}px; max-height: ${sidebarCardsHeight}px;`,
+    },
+      header("editor"),
+      projectCard(),
+      recorderCard(),
+      captureCard());
+
+    const gutterRow = isChatInMain ? null : h("div", {
+      class: "split-gutter split-gutter-row",
+      id: "gutter-row",
+      title: "Drag to resize Cards vs Chat · Double-click to reset (260px)",
+      onMousedown: startVerticalResize,
+      onDblclick: resetVerticalResize,
+    });
+
+    const chatContainer = isChatInMain
+      ? h("div", { class: "sidebar-chat-companion" },
+          h("div", { class: "card helper-companion-card" },
+            h("div", { class: "spread" },
+              h("strong", { style: "font-size:12px;display:flex;align-items:center;gap:6px;" },
+                h("span", null, "🤖"),
+                "Meta AI Co-Pilot"),
+              h("span", { class: "badge badge-ready", style: "font-size:10px;" }, "Active in Main View")),
+            h("p", { class: "quiet", style: "font-size:11px;margin:4px 0;" }, "Chat is expanded to the large main editor pane for maximum readability."),
+            h("div", { class: "row", style: "gap:6px;margin-top:6px;" },
+              h("button", {
+                class: "secondary icon-btn",
+                onClick: () => {
+                  mainViewTab = "prompt";
+                  saveLayoutState({ mainViewTab: "prompt" });
+                  render();
+                },
+                title: "Dock chat back into this sidebar",
+              }, "⤡ Dock to Sidebar"),
+              h("button", {
+                class: "ghost icon-btn",
+                onClick: () => {
+                  const input = document.querySelector(".helper-input");
+                  if (input) input.focus();
+                },
+                title: "Focus message input in main view",
+              }, "💬 Focus Chat"))))
+      : h("div", {
+          class: "sidebar-chat-container",
+          id: "sidebar-chat",
+        }, helperConsole({ inAside: true }));
+
+    const aside = isSidebarCollapsed
+      ? null
+      : h("aside", {
+          class: "stack sidebar-panel",
+          id: "sidebar-panel",
+          style: `width: ${sidebarWidth}px;`,
+        },
+          cardsContainer,
+          gutterRow,
+          chatContainer);
+
+    const gutterCol = isSidebarCollapsed
+      ? null
+      : h("div", {
+          class: "split-gutter split-gutter-col",
+          id: "gutter-col",
+          title: "Drag to resize sidebar width · Double-click to reset (420px)",
+          onMousedown: startHorizontalResize,
+          onDblclick: resetHorizontalResize,
+        });
+
+    const collapsedRail = isSidebarCollapsed
+      ? h("div", {
+          class: "sidebar-collapsed-rail",
+          id: "sidebar-rail",
+          title: "Click to expand sidebar",
+          onClick: toggleSidebar,
+        },
+          h("button", { class: "ghost rail-toggle-btn", title: "Expand sidebar (Calls, Project, Capture)" }, "▶"),
+          h("span", { class: "rail-vertical-label" }, `Calls (${state.captures.length})`))
+      : null;
+
+    const main = h("main", { class: "detail", id: "detail" }, detail());
+
+    return h("div", {
+      class: "layout layout-editor" + (isSidebarCollapsed ? " layout-sidebar-collapsed" : ""),
+      id: "shell",
+    },
+      aside,
+      gutterCol,
+      collapsedRail,
+      main);
   }
 
   function sidebarTabs() {
@@ -180,7 +431,11 @@ let detailScrollTop = 0;
       h("div", { class: "spread" },
         h("div", {
           class: "clickable-header",
-          onClick: () => { collapsed.project = !collapsed.project; render(); },
+          onClick: () => {
+            collapsed.project = !collapsed.project;
+            saveLayoutState({ collapsedProject: collapsed.project });
+            render();
+          },
           title: isCollapsed ? "Expand Project card" : "Collapse Project card",
         },
           h("span", { class: "collapse-arrow" }, isCollapsed ? "▸" : "▾"),
@@ -220,7 +475,11 @@ let detailScrollTop = 0;
       h("div", { class: "spread" },
         h("div", {
           class: "clickable-header",
-          onClick: () => { collapsed.recorder = !collapsed.recorder; render(); },
+          onClick: () => {
+            collapsed.recorder = !collapsed.recorder;
+            saveLayoutState({ collapsedRecorder: collapsed.recorder });
+            render();
+          },
           title: isCollapsed ? "Expand Capture card" : "Collapse Capture card",
         },
           h("span", { class: "collapse-arrow" }, isCollapsed ? "▸" : "▾"),
@@ -348,7 +607,11 @@ let detailScrollTop = 0;
       h("div", { class: "spread" },
         h("div", {
           class: "clickable-header",
-          onClick: () => { collapsed.capture = !collapsed.capture; render(); },
+          onClick: () => {
+            collapsed.capture = !collapsed.capture;
+            saveLayoutState({ collapsedCapture: collapsed.capture });
+            render();
+          },
           title: isCollapsed ? "Expand Calls card" : "Collapse Calls card",
         },
           h("span", { class: "collapse-arrow" }, isCollapsed ? "▸" : "▾"),
@@ -376,6 +639,9 @@ let detailScrollTop = 0;
     const status = capture.status ? "HTTP " + capture.status : capture.error ? "Not sent" : "Waiting";
     const pinned = capture.id === state.compareId;
     const isSelected = capture.id === state.selectedId;
+    const chatBadge = capture.chatCount
+      ? h("span", { class: "chat-indicator-pill", title: `${capture.chatCount} chat messages on this context window` }, `💬 ${capture.chatCount}`)
+      : null;
     return h("div", { class: "capture" + (isSelected ? " selected" : "") },
       h("button", {
         class: "capture-open",
@@ -387,7 +653,9 @@ let detailScrollTop = 0;
       },
         h("div", { class: "spread" },
           h("span", null, when),
-          h("span", { class: "meta" }, status)),
+          h("span", { class: "meta row", style: "gap:4px;align-items:center;" },
+            chatBadge,
+            status)),
         h("div", null, capture.model),
         h("div", { class: "quiet" },
           (capture.fileSpanCount > 0 ? capture.fileSpanCount + " source links · " : "") + capture.preview)),
@@ -397,6 +665,47 @@ let detailScrollTop = 0;
   }
 
   function detail() {
+    return h("div", { class: "detail-wrapper" },
+      detailTabs(),
+      h("div", { class: "detail-body" + (mainViewTab === "chat" ? " chat-mode" : "") },
+        mainViewTab === "chat" ? mainChatView() : promptDetailView()));
+  }
+
+  function detailTabs() {
+    const isChat = mainViewTab === "chat";
+    const helperActivityCount = state.helper && state.helper.activity ? state.helper.activity.length : 0;
+    const isBusy = Boolean(state.helper && state.helper.busy);
+    const tokenCount = state.selected ? (state.selected.estimatedTokens || 0).toLocaleString("en-US") + " tokens" : null;
+
+    return h("div", { class: "main-view-tabs spread" },
+      h("div", { class: "row", style: "gap:6px;align-items:center;" },
+        h("button", {
+          class: "tab-btn" + (!isChat ? " active" : ""),
+          onClick: () => {
+            mainViewTab = "prompt";
+            saveLayoutState({ mainViewTab: "prompt" });
+            render();
+          },
+          title: "Inspect prompt context window, attributed files, and token breakdown",
+        }, "📄 Context Window" + (tokenCount ? ` (${tokenCount})` : "")),
+        h("button", {
+          class: "tab-btn" + (isChat ? " active" : "") + (isBusy ? " pulse" : ""),
+          onClick: () => {
+            mainViewTab = "chat";
+            saveLayoutState({ mainViewTab: "chat" });
+            render();
+          },
+          title: "Full-width Meta AI Prompt Co-Pilot & Interrogation Chat",
+        }, isBusy ? "● Meta AI Working…" : `🤖 Meta AI Co-Pilot & Chat (${helperActivityCount})`)),
+      h("div", { class: "row", style: "gap:4px;align-items:center;" },
+        h("button", {
+          class: "ghost icon-btn sidebar-toggle-btn",
+          onClick: toggleSidebar,
+          title: isSidebarCollapsed ? "Show left sidebar" : "Hide left sidebar to maximize workspace",
+        }, isSidebarCollapsed ? "▶ Show Sidebar" : "◀ Hide Sidebar")));
+  }
+
+  function promptDetailView() {
     if (!state.selected) {
       return h("section", { class: "stack getting-started" },
         h("h2", null, "Context Window Inspector"),
@@ -417,6 +726,11 @@ let detailScrollTop = 0;
     return promptColumn(state.selected, null);
   }
 
+  function mainChatView() {
+    return h("section", { class: "main-chat-container" },
+      helperConsole({ inAside: false, inMain: true }));
+  }
+
   function promptColumn(capture, which) {
     const spans = flatten(capture);
     const surface = document.body.dataset.surface;
@@ -433,6 +747,37 @@ let detailScrollTop = 0;
               }, "🤖 AI Helper Chat")
             : null,
           h("button", { class: "ghost icon-btn", onClick: () => post({ type: "deleteCapture", id: capture.id }) }, "Delete call"))),
+      activeSelection
+        ? h("div", { class: "selection-floating-bar spread" },
+            h("div", { class: "row", style: "gap:6px;align-items:center;" },
+              h("span", { style: "font-size:13px;" }, "✂️"),
+              h("span", { class: "selection-bar-text" }, "Highlighted text: \"" + activeSelection.slice(0, 50) + (activeSelection.length > 50 ? "…" : "") + "\" (" + activeSelection.length + " chars)")),
+            h("div", { class: "row", style: "gap:6px;" },
+              h("button", {
+                class: "primary selection-ask-btn",
+                onClick: () => {
+                  post({
+                    type: "setScope",
+                    scope: {
+                      kind: "selection",
+                      selectedText: activeSelection,
+                      charCount: activeSelection.length,
+                      label: "Selection (" + activeSelection.length + " chars)",
+                    },
+                  });
+                  focusHelperConsole();
+                },
+                title: "Scope Meta AI questions to this selected text",
+              }, "💬 Ask Meta AI"),
+              h("button", {
+                class: "ghost icon-btn",
+                onClick: () => {
+                  activeSelection = "";
+                  render();
+                },
+                title: "Clear selection",
+              }, "✕")))
+        : null,
       h("p", { class: "meta" }, [
         formatTime(capture.createdAt),
         capture.provider,
@@ -446,16 +791,24 @@ let detailScrollTop = 0;
         (capture.fileSpanCount > 0 ? (capture.fileSpanCount + " sections matched to project files") : "No matching source files")),
       renderTelemetryBar(capture),
       bar(capture, spans),
-      ...capture.messages.map((message, idx) => renderMessage(capture, message, idx)),
+      ...(capture.messages || []).map((message, idx) => renderMessage(capture, message, idx)),
       h("section", { class: "reply" },
         h("h2", null, "Model reply"),
         h("p", { class: "quiet" }, "About " + capture.replyEstimatedTokens.toLocaleString("en-US") + " tokens · characters ÷ 4. This text was written by the model."),
-        h("pre", null, capture.reply.trim() ? capture.reply : "No text came back.")),
+        h("pre", null, capture.reply && capture.reply.trim() ? capture.reply : "No text came back.")),
       which ? null : exactHelp());
   }
 
   function focusHelperConsole() {
-    activeSidebarTab = "helper";
+    const surface = document.body.dataset.surface;
+    if (surface === "sidebar") {
+      activeSidebarTab = "helper";
+    } else {
+      if (mainViewTab === "prompt" && isSidebarCollapsed) {
+        isSidebarCollapsed = false;
+        saveLayoutState({ isSidebarCollapsed: false });
+      }
+    }
     render();
     setTimeout(() => {
       const el = document.getElementById("helper-console");
@@ -489,9 +842,12 @@ let detailScrollTop = 0;
   function helperConsole(options) {
     const helper = state.helper;
     const inAside = Boolean(options && options.inAside);
+    const inMain = Boolean(options && options.inMain);
     const activity = (helper && helper.activity) || [];
     const busy = Boolean(helper && helper.busy);
     const modelName = helper && helper.model ? (helperChoiceLabel(helper.model) || helper.model) : "Meta Muse";
+    const surface = document.body.dataset.surface;
+    const isEditor = surface === "editor";
 
     const statusBadge = busy
       ? h("span", { class: "badge badge-busy pulse" }, "● " + (helper.status || "Working…"))
@@ -500,14 +856,39 @@ let detailScrollTop = 0;
         : h("span", { class: "badge badge-idle" }, "○ Needs Key");
 
     const header = h("div", { class: "helper-console-header spread" },
-      h("div", { class: "row", style: "gap:6px;" },
+      h("div", { class: "row", style: "gap:6px;align-items:center;" },
         h("span", { style: "font-size:14px;" }, "🤖"),
-        h("h3", { style: "margin:0;font-size:12px;font-weight:600;" }, "Meta AI Helper"),
+        h("h3", { style: "margin:0;font-size:12px;font-weight:600;" }, inMain ? "Meta AI Prompt Co-Pilot & Interrogation" : "Meta AI Helper"),
         h("span", { class: "helper-model-pill" }, modelName),
+        state.selected
+          ? h("span", { class: "helper-context-pill", title: "Chat conversation scoped to this context window" }, "🎯 " + (state.selected.model || ("Call " + formatTime(state.selected.createdAt))))
+          : h("span", { class: "helper-context-pill", title: "Project-level conversation" }, "📁 Project"),
         statusBadge),
-      h("div", { class: "row", style: "gap:4px;" },
+      h("div", { class: "row", style: "gap:4px;align-items:center;" },
         activity.length > 0
-          ? h("button", { class: "ghost icon-btn", onClick: () => post({ type: "clearHelperActivity" }), title: "Clear activity log" }, "Clear")
+          ? h("button", { class: "ghost icon-btn", onClick: () => post({ type: "clearHelperActivity" }), title: state.selected ? "Clear chat for this context window" : "Clear project chat activity" }, "Clear")
+          : null,
+        isEditor && inAside
+          ? h("button", {
+              class: "secondary icon-btn expand-main-btn",
+              onClick: () => {
+                mainViewTab = "chat";
+                saveLayoutState({ mainViewTab: "chat" });
+                render();
+              },
+              title: "Expand chat into large main view",
+            }, "⤢ Expand to Main")
+          : null,
+        isEditor && inMain
+          ? h("button", {
+              class: "secondary icon-btn dock-sidebar-btn",
+              onClick: () => {
+                mainViewTab = "prompt";
+                saveLayoutState({ mainViewTab: "prompt" });
+                render();
+              },
+              title: "Dock chat back into left sidebar",
+            }, "⤡ Dock to Sidebar")
           : null,
         !helper || !helper.keySaved
           ? h("button", { class: "secondary icon-btn", onClick: send("openHelper") }, "Connect")
@@ -521,24 +902,148 @@ let detailScrollTop = 0;
         ? helperEmptyState()
         : activity.map(renderActivityItem));
 
-    return h("section", { class: "helper-console" + (inAside ? " helper-console-aside" : ""), id: "helper-console" },
+    return h("section", {
+      class: "helper-console" + (inAside ? " helper-console-aside" : "") + (inMain ? " helper-console-main" : ""),
+      id: "helper-console",
+    },
       header,
+      helperScopeBar(),
       feed,
       helperQuickChips(Boolean(state.selected)),
       helperInputRow());
   }
 
+  function helperScopeBar() {
+    if (!state.selected) {
+      return null;
+    }
+    const activeScope = (state.helper && state.helper.activeScope) || { kind: "global", label: "All Context" };
+    const isGlobal = activeScope.kind === "global";
+    const isSection = activeScope.kind === "section";
+    const isSelection = activeScope.kind === "selection";
+    const isCompare = activeScope.kind === "compare";
+
+    let icon = "🌐";
+    let scopeText = "All Context";
+    if (isGlobal) {
+      scopeText = "All Context (~" + (state.selected.estimatedTokens || 0).toLocaleString("en-US") + " tokens)";
+    } else if (isSection) {
+      icon = "🎯";
+      scopeText = "Section " + (activeScope.sectionId || "") + (activeScope.categoryLabel ? " · " + activeScope.categoryLabel : "") + (activeScope.label && activeScope.label !== activeScope.categoryLabel ? ": " + activeScope.label : "");
+    } else if (isSelection) {
+      icon = "✂️";
+      scopeText = "Selection (" + (activeScope.charCount || (activeScope.selectedText && activeScope.selectedText.length) || 0) + " chars)";
+    } else if (isCompare) {
+      icon = "⚖️";
+      scopeText = "Comparing vs " + (activeScope.compareCaptureId || (state.compare ? state.compare.id : "comparison"));
+    }
+
+    return h("div", { class: "helper-scope-bar spread" },
+      h("div", { class: "row", style: "gap:6px;align-items:center;overflow:hidden;flex:1;" },
+        h("span", { class: "scope-label-prefix" }, "Scope:"),
+        h("span", { class: "scope-pill " + (isGlobal ? "scope-pill-global" : "scope-pill-targeted") },
+          h("span", { style: "font-size:12px;" }, icon),
+          h("span", { class: "scope-pill-text", title: scopeText }, scopeText),
+          !isGlobal
+            ? h("button", {
+                class: "scope-clear-btn",
+                onClick: (e) => {
+                  e.stopPropagation();
+                  post({ type: "clearScope" });
+                },
+                title: "Clear scope and return to All Context",
+              }, "✕")
+            : null)),
+      h("div", { class: "row", style: "gap:4px;" },
+        !isGlobal
+          ? h("button", {
+              class: "ghost scope-reset-link",
+              onClick: () => post({ type: "clearScope" }),
+              title: "Reset scope to All Context",
+            }, "All Context")
+          : null));
+  }
+
   function helperEmptyState() {
+    if (state.selected) {
+      const model = state.selected.model || "Captured Model";
+      const tokenCount = (state.selected.estimatedTokens || 0).toLocaleString("en-US");
+      return h("div", { class: "helper-empty" },
+        h("div", { class: "spread" },
+          h("strong", null, "Meta AI Context Co-Pilot"),
+          h("span", { class: "meta" }, "🎯 " + model + " (~" + tokenCount + " tokens)")),
+        h("p", { class: "quiet" }, "Ask questions about this specific context window, detect contradictions, scan for PII, or optimize token usage. Chat is scoped to this capture."),
+        h("p", { class: "note", style: "margin-top:4px;" }, "Type below or choose a quick diagnostic action to begin."));
+    }
     return h("div", { class: "helper-empty" },
       h("div", { class: "spread" },
         h("strong", null, "Meta AI Assistant"),
-        h("span", { class: "meta" }, "Muse Spark / Wonder")),
-      h("p", { class: "quiet" }, "Ask questions about your prompts, investigate local AI services, or let Meta AI search your codebase for connection addresses."),
+        h("span", { class: "meta" }, "📁 Project Scope")),
+      h("p", { class: "quiet" }, "Select a call on the left to interrogate its context window, or ask questions about your project, investigate local AI services, or let Meta AI find model addresses."),
       h("p", { class: "note", style: "margin-top:4px;" }, "Type below or click a quick action to start."));
+  }
+
+  function renderPatchCard(item) {
+    const time = formatTime(item.timestamp);
+    const diff = item.detail || "";
+    const patch = item.patch || (state.helper && state.helper.activePatch);
+    const patchId = patch ? patch.patchId : undefined;
+    const impact = patch && patch.tokenImpactEstimate ? patch.tokenImpactEstimate : "optimized";
+    const isApplied = Boolean(item.patchApplied || (patch && patch.status === "applied"));
+
+    const lines = diff.split("\n");
+    const diffElements = lines.map((line) => {
+      if (line.startsWith("---") || line.startsWith("+++") || line.startsWith("@@")) {
+        return h("div", { class: "diff-line diff-meta" }, line);
+      }
+      if (line.startsWith("-")) {
+        return h("div", { class: "diff-line diff-del" }, line);
+      }
+      if (line.startsWith("+")) {
+        return h("div", { class: "diff-line diff-add" }, line);
+      }
+      return h("div", { class: "diff-line" }, line);
+    });
+
+    return h("div", { class: "helper-item patch-card" + (isApplied ? " patch-applied" : "") },
+      h("div", { class: "patch-card-header spread" },
+        h("div", { class: "row", style: "gap:6px;align-items:center;" },
+          h("span", { class: "helper-badge finish-badge" }, "🛠️ Proposed Patch"),
+          h("span", { class: "patch-file-pill" }, patch ? patch.file + ":" + patch.startLine + "-" + patch.endLine : "Source Template"),
+          isApplied
+            ? h("span", { class: "patch-applied-pill" }, "✅ Applied")
+            : h("span", { class: "patch-impact-pill" }, impact)),
+        h("span", { class: "helper-time" }, time)),
+      h("p", { class: "patch-description" }, item.text),
+      patch && patch.explanation ? h("p", { class: "patch-explanation" }, patch.explanation) : null,
+      h("div", { class: "diff-viewer" }, ...diffElements),
+      h("div", { class: "patch-actions spread", style: "align-items:center;" },
+        isApplied
+          ? h("div", { class: "row", style: "gap:6px;align-items:center;" },
+              h("span", { style: "color:#4ade80;font-size:12px;font-weight:600;" }, "✓ Applied to workspace"),
+              h("span", { class: "quiet", style: "font-size:11px;" }, patch ? (patch.file + ":" + patch.startLine) : ""))
+          : h("button", {
+              class: "primary patch-apply-btn",
+              disabled: Boolean(state.helper && state.helper.busy),
+              onClick: () => post({ type: "applyPatch", patchId: patchId, patch: patch }),
+              title: "Apply this patch directly to the file in the workspace",
+            }, "✅ Apply Patch to Workspace"),
+        h("button", {
+          class: "ghost icon-btn",
+          onClick: () => post({ type: "clearHelperActivity" }),
+          title: "Dismiss this patch proposal",
+        }, "✕ Dismiss")));
   }
 
   function renderActivityItem(item) {
     const time = formatTime(item.timestamp);
+    if (item.kind === "assistant") {
+      return h("div", { class: "helper-item helper-assistant" },
+        h("div", { class: "helper-item-header" },
+          h("span", { class: "helper-badge assistant-badge" }, "🤖 Meta AI"),
+          h("span", { class: "helper-time" }, time)),
+        h("div", { class: "helper-assistant-body" }, item.text));
+    }
     if (item.kind === "thought") {
       return h("div", { class: "helper-item helper-thought" },
         h("div", { class: "helper-item-header" },
@@ -564,6 +1069,9 @@ let detailScrollTop = 0;
         h("pre", { class: "helper-pre" }, item.text));
     }
     if (item.kind === "finish") {
+      if (item.detail && item.detail.includes("--- a/")) {
+        return renderPatchCard(item);
+      }
       return h("div", { class: "helper-item helper-finish" },
         h("div", { class: "helper-item-header" },
           h("span", { class: "helper-badge finish-badge" }, "🎯 Outcome"),
@@ -585,7 +1093,48 @@ let detailScrollTop = 0;
 
   function helperQuickChips(hasSelectedCapture) {
     const busy = Boolean(state.helper && state.helper.busy);
+    const activeScope = state.helper && state.helper.activeScope;
     const chips = [];
+
+    if (hasSelectedCapture) {
+      chips.push(h("button", {
+        class: "chip-btn chip-highlight",
+        disabled: busy,
+        onClick: () => post({ type: "quickAction", action: "detect_contradictions", scope: activeScope }),
+        title: "Analyze prompt context for contradictions between system rules, RAG data, and user query",
+      }, "🔍 Detect Contradictions"));
+
+      chips.push(h("button", {
+        class: "chip-btn",
+        disabled: busy,
+        onClick: () => post({ type: "quickAction", action: "optimize_context", scope: activeScope }),
+        title: "Audit context window for bloat, redundant history, and estimated token savings",
+      }, "✂️ Optimize & Prune"));
+
+      chips.push(h("button", {
+        class: "chip-btn",
+        disabled: busy,
+        onClick: () => post({ type: "quickAction", action: "scan_pii", scope: activeScope }),
+        title: "Scan context window for credentials, sensitive data, and prompt leaks",
+      }, "🛡️ Scan PII"));
+
+      chips.push(h("button", {
+        class: "chip-btn",
+        disabled: busy,
+        onClick: () => post({ type: "quickAction", action: "explain_output" }),
+        title: "Explain how system instructions and RAG grounding produced the model's completion",
+      }, "💡 Explain Output"));
+
+      if (state.compare) {
+        chips.push(h("button", {
+          class: "chip-btn chip-highlight",
+          disabled: busy,
+          onClick: () => post({ type: "quickAction", action: "compare_captures" }),
+          title: "Compare prompt divergence and behavioral changes between the active and comparison capture",
+        }, "🔄 Compare Captures"));
+      }
+    }
+
     chips.push(h("button", {
       class: "chip-btn",
       disabled: busy,
@@ -631,17 +1180,43 @@ let detailScrollTop = 0;
       }, "📊 Context telemetry"));
     }
 
-    return h("div", { class: "helper-chips" }, ...chips);
+    const toggle = h("div", {
+      class: "quick-actions-bar spread",
+      onClick: () => {
+        quickActionsCollapsed = !quickActionsCollapsed;
+        saveLayoutState({ quickActionsCollapsed });
+        render();
+      },
+      title: quickActionsCollapsed ? "Expand quick diagnostic actions" : "Collapse quick diagnostic actions to save vertical space",
+    },
+      h("div", { class: "row", style: "gap:6px;align-items:center;" },
+        h("span", { class: "collapse-arrow" }, quickActionsCollapsed ? "▸" : "▾"),
+        h("span", { class: "quick-actions-title" }, `⚡ Quick Actions (${chips.length})`)),
+      quickActionsCollapsed
+        ? h("div", { class: "row", style: "gap:4px;overflow:hidden;align-items:center;" },
+            hasSelectedCapture ? h("span", { class: "quick-actions-mini-tag" }, "🔍 Contradictions") : null,
+            hasSelectedCapture ? h("span", { class: "quick-actions-mini-tag" }, "✂️ Optimize") : null,
+            h("span", { class: "quick-actions-mini-tag quiet", style: "font-size:9.5px;" }, "click to expand"))
+        : null);
+
+    return h("div", { class: "helper-chips-container" },
+      toggle,
+      quickActionsCollapsed ? null : h("div", { class: "helper-chips" }, ...chips));
   }
 
   function helperInputRow() {
+    const isBusy = Boolean(state.helper && state.helper.busy);
     return h("div", { class: "helper-input-row" },
-      h("input", {
-        type: "text",
+      h("textarea", {
         class: "helper-input",
-        placeholder: "Ask Meta AI helper or direct sensory tools (e.g. 'search for ollama port')...",
+        rows: "1",
+        placeholder: "Ask Meta AI Co-Pilot (Enter to send, Shift+Enter for newline)...",
         value: helperMessageInput,
-        onInput: (event) => { helperMessageInput = event.target.value; },
+        onInput: (event) => {
+          helperMessageInput = event.target.value;
+          event.target.style.height = "auto";
+          event.target.style.height = Math.min(event.target.scrollHeight, 130) + "px";
+        },
         onKeyDown: (event) => {
           if (event.key === "Enter" && !event.shiftKey) {
             event.preventDefault();
@@ -651,9 +1226,10 @@ let detailScrollTop = 0;
       }),
       h("button", {
         class: "primary helper-send-btn",
-        disabled: Boolean(state.helper && state.helper.busy),
+        disabled: isBusy,
         onClick: submitHelperMessage,
-      }, "Send"));
+        title: "Send message (Enter)",
+      }, isBusy ? "..." : "Send"));
   }
 
   function barClass(span) {
@@ -702,44 +1278,198 @@ let detailScrollTop = 0;
     const hasFileSpan = message.spans.some((s) => s.kind === "file");
     const isAttributing = attributingMessage === (capture.id + ":" + messageIndex);
     const canAttribute = !hasFileSpan && message.role !== "assistant" && message.spans.length > 0;
-    const telemetry = message.telemetry;
+    const telemetries = (message.telemetries && message.telemetries.length > 0)
+      ? message.telemetries
+      : (message.telemetry ? [message.telemetry] : []);
 
-    return h("section", { class: "message", id: "message-" + capture.id + "-" + messageIndex },
+    const isTools = message.role === "tools";
+    const toolsCount = isTools ? telemetries.length : 0;
+    const roleTitle = isTools && toolsCount > 0
+      ? "Tool Definitions (" + toolsCount + " tool" + (toolsCount > 1 ? "s" : "") + ")"
+      : message.roleLabel;
+
+    return h("section", { class: "message" + (isTools ? " message-tools" : ""), id: "message-" + capture.id + "-" + messageIndex },
       h("div", { class: "spread" },
-        h("h2", null, message.roleLabel),
-        canAttribute && !telemetry
-          ? h("button", {
-              class: "ghost attribution-btn",
-              disabled: isAttributing || (state.helper && state.helper.busy),
-              onClick: () => attributeMessage(capture.id, messageIndex),
-              title: "Use Meta AI to search the project and attribute this prompt to a template or source file",
-            }, isAttributing ? "Attributing…" : "✨ Attribute with Meta AI")
-          : null),
-      telemetry ? renderAnatomyCard(capture, message, messageIndex, telemetry) : null,
+        h("h2", null, roleTitle),
+        h("div", { class: "row", style: "gap:4px;align-items:center;" },
+          h("button", {
+            class: "ghost ask-ai-btn",
+            onClick: () => {
+              post({
+                type: "setScope",
+                scope: {
+                  kind: "section",
+                  sectionId: telemetries[0]?.sectionId || ("msg-" + messageIndex),
+                  messageIndex: messageIndex,
+                  label: roleTitle + " (#" + (messageIndex + 1) + ")",
+                },
+              });
+              focusHelperConsole();
+            },
+            title: "Scope Meta AI questions to this " + roleTitle,
+          }, "💬 Ask AI"),
+          canAttribute && telemetries.length === 0
+            ? h("button", {
+                class: "ghost attribution-btn",
+                disabled: isAttributing || (state.helper && state.helper.busy),
+                onClick: () => attributeMessage(capture.id, messageIndex),
+                title: "Use Meta AI to search the project and attribute this prompt to a template or source file",
+              }, isAttributing ? "Attributing…" : "✨ Attribute with Meta AI")
+            : null)),
+      isTools && telemetries.length > 0
+        ? renderToolsBreakdown(capture, message, messageIndex, telemetries)
+        : (telemetries.length > 0
+            ? h("div", { class: "stack", style: "gap:6px;margin-bottom:8px;" },
+                ...telemetries.map((t) => renderAnatomyCard(capture, message, messageIndex, t)))
+            : null),
       message.truncated ? h("p", { class: "quiet" }, "This part was shortened for display. The model still received the full text.") : null,
-      ...message.spans.map((span) => renderSpan(capture, span)));
+      !isTools ? message.spans.map((span) => renderSpan(capture, span)) : null);
+  }
+
+  function renderToolsBreakdown(capture, message, messageIndex, telemetries) {
+    const rawKey = capture.id + ":raw-tools:" + messageIndex;
+    const isRawOpen = Boolean(showRawToolsJson.get(rawKey));
+
+    const recCount = telemetries.filter((t) => t.secondOpinion && t.secondOpinion.verdict === "recommended").length;
+    const bloatCount = telemetries.filter((t) => t.secondOpinion && (t.secondOpinion.verdict === "unnecessary" || t.secondOpinion.verdict === "bloat")).length;
+    const cautionCount = telemetries.filter((t) => t.secondOpinion && (t.secondOpinion.verdict === "caution" || t.secondOpinion.verdict === "security_risk" || t.secondOpinion.verdict === "redundant")).length;
+    const totalTokens = telemetries.reduce((sum, t) => sum + t.tokenEstimate, 0);
+
+    return h("div", { class: "tools-overview-container", id: "section-" + capture.id + "-tools" },
+      h("div", { class: "tools-summary-bar" },
+        h("div", { class: "row", style: "gap:6px;align-items:center;flex-wrap:wrap;" },
+          h("span", { class: "tools-summary-title" }, "🛠️ Tool Architecture & Meta AI Hygiene Review"),
+          h("span", { class: "quiet", style: "font-size:11px;" }, totalTokens.toLocaleString("en-US") + " tokens total")),
+        h("div", { class: "row", style: "gap:6px;align-items:center;flex-wrap:wrap;" },
+          recCount > 0 ? h("span", { class: "badge-verdict verdict-recommended" }, "✅ " + recCount + " Active") : null,
+          bloatCount > 0 ? h("span", { class: "badge-verdict verdict-unnecessary" }, "⚠️ " + bloatCount + " Unneeded Bloat") : null,
+          cautionCount > 0 ? h("span", { class: "badge-verdict verdict-caution" }, "🛡️ " + cautionCount + " Caution/Risk") : null)),
+      h("div", { class: "tools-cards-list" },
+        ...telemetries.map((t) => {
+          const toolKey = capture.id + ":" + t.sectionId;
+          const isSchemaExpanded = expandedToolSchemas.has(toolKey);
+          const opinion = t.secondOpinion;
+          const verdictClass = opinion ? ("verdict-" + opinion.verdict) : "";
+
+          return h("div", { class: "tool-card", id: "section-" + capture.id + "-" + t.sectionId },
+            h("div", { class: "tool-card-header" },
+              h("div", { class: "row", style: "gap:6px;align-items:center;flex-wrap:wrap;" },
+                h("code", { class: "tool-name-badge" }, "🔧 " + (t.toolName || "tool")),
+                h("span", { class: "anatomy-meta" },
+                  t.tokenEstimate.toLocaleString("en-US") + " tokens · " + t.tokenPercentage + "% of context"),
+                opinion ? h("span", { class: "badge-verdict " + verdictClass }, opinion.verdictLabel) : null),
+              h("div", { class: "row", style: "gap:4px;align-items:center;" },
+                h("button", {
+                  class: "ghost ask-ai-btn",
+                  onClick: () => {
+                    post({
+                      type: "setScope",
+                      scope: {
+                        kind: "section",
+                        sectionId: t.sectionId,
+                        messageIndex: messageIndex,
+                        category: t.category,
+                        categoryLabel: t.categoryLabel,
+                        label: "Tool: " + (t.toolName || t.what),
+                      },
+                    });
+                    focusHelperConsole();
+                  },
+                  title: "Scope Meta AI questions to tool " + (t.toolName || t.what),
+                }, "💬 Ask AI"),
+                h("button", {
+                  class: "ghost icon-btn",
+                  style: "font-size:11px;padding:2px 6px;",
+                  onClick: () => {
+                    if (expandedToolSchemas.has(toolKey)) {
+                      expandedToolSchemas.delete(toolKey);
+                    } else {
+                      expandedToolSchemas.add(toolKey);
+                    }
+                    render();
+                  },
+                  title: "Toggle JSON schema definition",
+                }, isSchemaExpanded ? "Hide Schema" : "Show Schema"))),
+            h("div", { class: "anatomy-body" },
+              h("div", { class: "anatomy-what" },
+                h("span", { class: "anatomy-prefix" }, "🎯 WHAT:"),
+                h("span", null, t.what)),
+              h("div", { class: "anatomy-why" },
+                h("span", { class: "anatomy-prefix" }, "💡 WHY:"),
+                h("span", null, t.why))),
+            opinion && opinion.advice
+              ? h("div", { class: "anatomy-second-opinion " + verdictClass },
+                  h("span", { class: "anatomy-prefix" }, "🤖 META AI SECOND OPINION:"),
+                  h("span", null, opinion.advice))
+              : null,
+            t.warning && (!opinion || t.warning !== opinion.advice)
+              ? h("div", { class: "anatomy-warning-pill" }, "⚠️ " + t.warning)
+              : null,
+            isSchemaExpanded
+              ? h("div", { class: "tool-schema-block" },
+                  h("div", { class: "quiet", style: "font-size:10.5px;margin-bottom:4px;" }, "JSON Schema Definition:"),
+                  h("pre", { style: "max-height:220px;overflow-y:auto;font-size:11px;margin:0;" }, t.content || ""))
+              : null);
+        })),
+      h("div", { style: "margin-top:8px;" },
+        h("button", {
+          class: "ghost",
+          style: "font-size:11px;padding:3px 8px;opacity:0.8;",
+          onClick: () => {
+            showRawToolsJson.set(rawKey, !isRawOpen);
+            render();
+          },
+        }, isRawOpen ? "▼ Hide Full Raw Tools JSON" : "▶ Show Full Raw Tools JSON (" + message.spans.length + " payload block" + (message.spans.length > 1 ? "s" : "") + ")"),
+        isRawOpen
+          ? h("div", { style: "margin-top:6px;" }, ...message.spans.map((span) => renderSpan(capture, span)))
+          : null));
   }
 
   function renderAnatomyCard(capture, message, messageIndex, telemetry) {
     const isAttributing = attributingMessage === (capture.id + ":" + messageIndex);
     const canTrace = message.role !== "assistant" && !message.spans.some((s) => s.kind === "file");
     const catClass = "cat-" + telemetry.category;
+    const labelTitle = telemetry.heading
+      ? (categoryIcon(telemetry.category) + " " + telemetry.heading)
+      : (categoryIcon(telemetry.category) + " " + telemetry.categoryLabel);
 
-    return h("div", { class: "anatomy-card" },
+    const opinion = telemetry.secondOpinion;
+    const verdictClass = opinion ? ("verdict-" + opinion.verdict) : "";
+
+    return h("div", { class: "anatomy-card", id: "section-" + capture.id + "-" + telemetry.sectionId },
       h("div", { class: "anatomy-card-header" },
-        h("div", { class: "row", style: "gap:6px;align-items:center;" },
-          h("span", { class: "badge-category " + catClass },
-            categoryIcon(telemetry.category) + " " + telemetry.categoryLabel),
+        h("div", { class: "row", style: "gap:6px;align-items:center;flex-wrap:wrap;" },
+          h("span", { class: "badge-category " + catClass }, labelTitle),
           h("span", { class: "anatomy-meta" },
-            telemetry.tokenEstimate.toLocaleString("en-US") + " tokens · " + telemetry.tokenPercentage + "% of context")),
-        canTrace
-          ? h("button", {
-              class: "ghost attribution-btn",
-              disabled: isAttributing || (state.helper && state.helper.busy),
-              onClick: () => attributeMessage(capture.id, messageIndex),
-              title: "Attribute this " + telemetry.categoryLabel + " block to source template using Meta AI",
-            }, isAttributing ? "Tracing…" : "✨ Trace in Code")
-          : null),
+            telemetry.tokenEstimate.toLocaleString("en-US") + " tokens · " + telemetry.tokenPercentage + "% of context"),
+          opinion ? h("span", { class: "badge-verdict " + verdictClass }, opinion.verdictLabel) : null),
+        h("div", { class: "row", style: "gap:4px;align-items:center;" },
+          h("button", {
+            class: "ghost ask-ai-btn",
+            onClick: () => {
+              post({
+                type: "setScope",
+                scope: {
+                  kind: "section",
+                  sectionId: telemetry.sectionId,
+                  messageIndex: messageIndex,
+                  category: telemetry.category,
+                  categoryLabel: telemetry.categoryLabel,
+                  label: telemetry.heading || telemetry.what || telemetry.categoryLabel,
+                },
+              });
+              focusHelperConsole();
+            },
+            title: "Scope Meta AI questions to this " + (telemetry.heading || telemetry.categoryLabel) + " section",
+          }, "💬 Ask AI"),
+          canTrace
+            ? h("button", {
+                class: "ghost attribution-btn",
+                disabled: isAttributing || (state.helper && state.helper.busy),
+                onClick: () => attributeMessage(capture.id, messageIndex),
+                title: "Attribute this " + telemetry.categoryLabel + " block to source template using Meta AI",
+              }, isAttributing ? "Tracing…" : "✨ Trace in Code")
+            : null)),
       h("div", { class: "anatomy-body" },
         h("div", { class: "anatomy-what" },
           h("span", { class: "anatomy-prefix" }, "🎯 WHAT:"),
@@ -747,7 +1477,12 @@ let detailScrollTop = 0;
         h("div", { class: "anatomy-why" },
           h("span", { class: "anatomy-prefix" }, "💡 WHY:"),
           h("span", null, telemetry.why))),
-      telemetry.warning
+      opinion && opinion.advice
+        ? h("div", { class: "anatomy-second-opinion " + verdictClass },
+            h("span", { class: "anatomy-prefix" }, "🤖 META AI OPINION:"),
+            h("span", null, opinion.advice))
+        : null,
+      telemetry.warning && (!opinion || telemetry.warning !== opinion.advice)
         ? h("div", { class: "anatomy-warning-pill" }, "⚠️ " + telemetry.warning)
         : null);
   }
@@ -795,12 +1530,18 @@ let detailScrollTop = 0;
         ...sections.map((section) => {
           const catClass = "cat-" + section.category;
           const width = Math.max(1, section.tokenEstimate);
-          const title = section.categoryLabel + ": " + section.tokenEstimate.toLocaleString("en-US") + " tokens (" + section.tokenPercentage + "%)\n" + section.what + "\n" + section.why;
+          const nameLabel = section.toolName
+            ? ("🔧 Tool: " + section.toolName)
+            : (section.heading ? ("🟢 " + section.heading) : section.categoryLabel);
+          const opinionPart = section.secondOpinion
+            ? ("\n🤖 Second Opinion: [" + section.secondOpinion.verdictLabel + "] " + section.secondOpinion.advice)
+            : (section.warning ? ("\n⚠️ " + section.warning) : "");
+          const title = nameLabel + ": " + section.tokenEstimate.toLocaleString("en-US") + " tokens (" + section.tokenPercentage + "%)\n🎯 " + section.what + "\n💡 " + section.why + opinionPart;
           return h("button", {
             class: "telemetry-segment " + catClass,
             style: "flex:" + width + " 1 0",
             title: title,
-            onClick: () => scrollToMessage(capture.id, section.messageIndex),
+            onClick: () => scrollToSectionOrMessage(capture.id, section.messageIndex, section.sectionId),
           });
         })),
       h("div", { class: "telemetry-legend" },
@@ -811,7 +1552,7 @@ let detailScrollTop = 0;
             title: "Click to jump to " + item.categoryLabel,
             onClick: () => {
               const match = sections.find((s) => s.category === item.category);
-              if (match) scrollToMessage(capture.id, match.messageIndex);
+              if (match) scrollToSectionOrMessage(capture.id, match.messageIndex, match.sectionId);
             },
           },
             h("span", { class: "swatch " + catClass, style: "border-radius:2px;" }),
@@ -824,6 +1565,19 @@ let detailScrollTop = 0;
               h("span", null, "⚠️"),
               h("span", null, w))))
         : null);
+  }
+
+  function scrollToSectionOrMessage(captureId, messageIndex, sectionId) {
+    if (sectionId) {
+      const el = document.getElementById("section-" + captureId + "-" + sectionId);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "start" });
+        el.classList.add("highlight-pulse");
+        setTimeout(() => el.classList.remove("highlight-pulse"), 2000);
+        return;
+      }
+    }
+    scrollToMessage(captureId, messageIndex);
   }
 
   function categoryIcon(category) {

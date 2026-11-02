@@ -2,7 +2,7 @@ import crypto from "crypto";
 import fs from "fs/promises";
 import path from "path";
 import { projectKey } from "./paths";
-import type { CachedAttribution, CaptureSummary, StoredCapture } from "./types";
+import type { CachedAttribution, CaptureSummary, ChatConversation, StoredCapture } from "./types";
 
 type IndexFile = {
   projects: Record<string, { path: string; items: CaptureSummary[] }>;
@@ -12,6 +12,7 @@ const CAPTURE_LIMIT = 100;
 
 export class CaptureStore {
   private memory = new Map<string, StoredCapture>();
+  private chatMemory = new Map<string, ChatConversation>();
   private indexPath: string;
 
   constructor(private root: string) {
@@ -59,6 +60,7 @@ export class CaptureStore {
       if (!kept.has(item.id)) {
         await fs.rm(this.capturePath(capture.projectPath, item.id), { force: true });
         this.memory.delete(item.id);
+        await this.removeChat(capture.projectPath, item.id);
       }
     }
     index.projects[key] = { path: path.resolve(capture.projectPath), items };
@@ -252,6 +254,7 @@ export class CaptureStore {
   async remove(projectPath: string, id: string): Promise<CaptureSummary[]> {
     await fs.rm(this.capturePath(projectPath, id), { force: true });
     this.memory.delete(id);
+    await this.removeChat(projectPath, id);
     const index = await this.readIndex();
     const key = projectKey(projectPath);
     const items = (index.projects[key]?.items ?? []).filter((item) => item.id !== id);
@@ -265,10 +268,64 @@ export class CaptureStore {
     const key = projectKey(projectPath);
     for (const item of index.projects[key]?.items ?? []) {
       this.memory.delete(item.id);
+      this.chatMemory.delete(`${key}:${item.id}`);
     }
+    this.chatMemory.delete(`${key}:project`);
     await fs.rm(path.join(this.root, key), { recursive: true, force: true });
     index.projects[key] = { path: path.resolve(projectPath), items: [] };
     await this.writeIndex(index);
+  }
+
+  private chatPath(projectPath: string, conversationId: string): string {
+    const safeId = conversationId.replace(/[^a-zA-Z0-9_-]/g, "_");
+    return path.join(this.root, projectKey(projectPath), "chats", `${safeId}.json`);
+  }
+
+  async getChat(projectPath: string, conversationId: string): Promise<ChatConversation | null> {
+    const key = projectKey(projectPath);
+    const memKey = `${key}:${conversationId}`;
+    const cached = this.chatMemory.get(memKey);
+    if (cached) {
+      return cached;
+    }
+    const file = this.chatPath(projectPath, conversationId);
+    try {
+      const data = JSON.parse(await fs.readFile(file, "utf8")) as ChatConversation;
+      if (data && typeof data === "object" && Array.isArray(data.activity)) {
+        this.chatMemory.set(memKey, data);
+        return data;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  async saveChat(projectPath: string, conversation: ChatConversation): Promise<void> {
+    const file = this.chatPath(projectPath, conversation.id);
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await writeJson(file, conversation);
+    const memKey = `${projectKey(projectPath)}:${conversation.id}`;
+    this.chatMemory.set(memKey, conversation);
+  }
+
+  async removeChat(projectPath: string, conversationId: string): Promise<void> {
+    const file = this.chatPath(projectPath, conversationId);
+    await fs.rm(file, { force: true });
+    const memKey = `${projectKey(projectPath)}:${conversationId}`;
+    this.chatMemory.delete(memKey);
+  }
+
+  async listChats(projectPath: string): Promise<string[]> {
+    const chatDir = path.join(this.root, projectKey(projectPath), "chats");
+    try {
+      const entries = await fs.readdir(chatDir);
+      return entries
+        .filter((e) => e.endsWith(".json"))
+        .map((e) => e.replace(/\.json$/, ""));
+    } catch {
+      return [];
+    }
   }
 
   private capturePath(projectPath: string, id: string): string {

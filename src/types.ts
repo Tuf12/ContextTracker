@@ -67,6 +67,7 @@ export type CaptureSummary = {
   error: string | null;
   preview: string;
   fileSpanCount?: number;
+  chatCount?: number;
 };
 
 export type FilePointer = {
@@ -115,6 +116,8 @@ export type CaptureView = {
   reply: string;
   fileSpanCount: number;
   telemetry?: CaptureTelemetry;
+  sections?: ContextSection[];
+  activeScope?: ContextScope;
 };
 
 export type EnvKeyPlan = {
@@ -138,6 +141,7 @@ export type ViewMessage = {
   truncated: boolean;
   spans: ViewSpan[];
   telemetry?: SectionTelemetry;
+  telemetries?: SectionTelemetry[];
 };
 
 export type ProjectView = {
@@ -200,7 +204,7 @@ export type HelperModelChoice = {
   label: string;
 };
 
-export type HelperActivityKind = "thought" | "tool_call" | "tool_result" | "status" | "finish" | "user";
+export type HelperActivityKind = "thought" | "tool_call" | "tool_result" | "status" | "finish" | "user" | "assistant";
 
 export type HelperActivityItem = {
   id: string;
@@ -209,6 +213,29 @@ export type HelperActivityItem = {
   text: string;
   toolName?: string;
   detail?: string;
+  patch?: TemplatePatchProposal;
+  patchApplied?: boolean;
+};
+
+export type OpenAIToolCall = {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+};
+
+export type ChatMessage = {
+  role: "system" | "user" | "assistant" | "tool";
+  content: string | null;
+  tool_calls?: OpenAIToolCall[];
+  tool_call_id?: string;
+};
+
+export type ChatConversation = {
+  id: string;
+  activity: HelperActivityItem[];
+  messages: ChatMessage[];
+  activePatch?: TemplatePatchProposal | null;
+  updatedAt: number;
 };
 
 export type HelperView = {
@@ -221,6 +248,10 @@ export type HelperView = {
   status: string | null;
   offer: AddressOffer | null;
   activity: HelperActivityItem[];
+  activeScope?: ContextScope;
+  activePatch?: TemplatePatchProposal | null;
+  threadCount?: number;
+  conversationId?: string;
 };
 
 export type ViewState = {
@@ -244,6 +275,20 @@ export type ContextSectionCategory =
   | "user_query"
   | "runtime_data";
 
+export type ToolSecondOpinionVerdict =
+  | "recommended"
+  | "caution"
+  | "bloat"
+  | "unnecessary"
+  | "redundant"
+  | "security_risk";
+
+export type ToolSecondOpinion = {
+  verdict: ToolSecondOpinionVerdict;
+  verdictLabel: string;
+  advice: string;
+};
+
 export type SectionTelemetry = {
   sectionId: string;
   messageIndex: number;
@@ -255,6 +300,10 @@ export type SectionTelemetry = {
   tokenEstimate: number;
   tokenPercentage: number;
   warning?: string;
+  toolName?: string;
+  heading?: string;
+  secondOpinion?: ToolSecondOpinion;
+  fromModel?: boolean;
 };
 
 export type CategoryComposition = {
@@ -286,6 +335,107 @@ export type ContextSection = {
   isCollapsedHistory?: boolean;
   turns?: number;
   preview: string;
+  toolName?: string;
+  heading?: string;
+  parametersJson?: string;
+};
+
+export type ContextScopeKind = "global" | "section" | "selection" | "compare";
+
+export type ContextScope = {
+  kind: ContextScopeKind;
+  sectionId?: string;
+  category?: ContextSectionCategory;
+  categoryLabel?: string;
+  selectedText?: string;
+  charCount?: number;
+  messageIndex?: number;
+  compareCaptureId?: string;
+  label: string;
+};
+
+export type ContextSectionMatch = {
+  sectionId: string;
+  messageIndex: number;
+  category: ContextSectionCategory;
+  line: number;
+  snippet: string;
+  charOffset: number;
+};
+
+export type ContextQueryResult = {
+  matchesCount: number;
+  matches: ContextSectionMatch[];
+};
+
+export type ContextSectionReadResult = {
+  sectionId: string;
+  role: string;
+  category: ContextSectionCategory;
+  totalLines: number;
+  startLine: number;
+  endLine: number;
+  tokens: number;
+  content: string;
+};
+
+export type TemplatePatchProposal = {
+  patchId: string;
+  status: "ready_for_user_approval" | "applied" | "rejected";
+  file: string;
+  startLine: number;
+  endLine: number;
+  originalCode: string;
+  replacementCode: string;
+  explanation: string;
+  tokenImpactEstimate: string;
+  diffPreview: string;
+};
+
+export type CodeTemplateInspectionResult = {
+  attributed: boolean;
+  file?: string;
+  startLine?: number;
+  endLine?: number;
+  templateType?: string;
+  templateSource?: string;
+  runtimeInterpolations?: Array<{ variable: string; value?: string; count?: number }>;
+  explanation?: string;
+};
+
+export type DiffCapturesResult = {
+  primaryId: string;
+  compareId: string;
+  primaryModel: string;
+  compareModel: string;
+  statusComparison: {
+    primaryStatus: number | null;
+    compareStatus: number | null;
+    primaryError: string | null;
+    compareError: string | null;
+  };
+  tokenComparison: {
+    primaryTokens: number;
+    compareTokens: number;
+    delta: number;
+  };
+  sectionComparison: {
+    primaryCount: number;
+    compareCount: number;
+    delta: number;
+  };
+  categoryDivergence: Array<{
+    category: ContextSectionCategory;
+    categoryLabel: string;
+    primaryTokens: number;
+    compareTokens: number;
+    delta: number;
+  }>;
+  keyDivergences: string[];
+  replyComparison?: {
+    primaryReplyPreview: string;
+    compareReplyPreview: string;
+  };
 };
 
 export type AndroidDevice = {

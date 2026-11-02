@@ -7,6 +7,8 @@ import type {
   ContextSectionCategory,
   PromptMessage,
   SectionTelemetry,
+  ToolSecondOpinion,
+  ToolSecondOpinionVerdict,
 } from "./types";
 
 export const CATEGORY_LABELS: Record<ContextSectionCategory, string> = {
@@ -120,6 +122,205 @@ function truncatePreview(text: string, maxChars = 200): string {
   return trimmed.slice(0, maxChars) + "…";
 }
 
+export type SystemSubSection = {
+  heading: string;
+  content: string;
+};
+
+export function splitSystemSections(content: string): SystemSubSection[] {
+  const trimmed = content.trim();
+  if (!trimmed || trimmed.length < 150) {
+    return [{ heading: "System Instructions", content: trimmed }];
+  }
+
+  // Split by double newlines or markdown headers
+  const rawBlocks = trimmed.split(/\n\s*\n+/).map((b) => b.trim()).filter(Boolean);
+  if (rawBlocks.length <= 1) {
+    return [{ heading: "System Instructions", content: trimmed }];
+  }
+
+  const sections: SystemSubSection[] = [];
+  let currentAccumulator: string[] = [];
+  let currentHeading = "";
+
+  for (const block of rawBlocks) {
+    const firstLine = block.split("\n")[0].trim();
+    const mdHeaderMatch = firstLine.match(/^#{1,6}\s+(.+)$/);
+    const labelColonMatch = firstLine.match(/^([A-Za-z0-9 _\-/]{2,50}):(?:\s*|$)/);
+    const bracketMatch = firstLine.match(/^\[([A-Za-z0-9 _\-/]{2,50})\](?:\s*|$)/);
+    const xmlMatch = firstLine.match(/^<([a-z0-9_\-]+)>(?:\s*|$)/i);
+
+    const isDistinctSection =
+      Boolean(mdHeaderMatch || labelColonMatch || bracketMatch || xmlMatch) ||
+      (block.length > 80 && block.includes("\n-"));
+
+    if (isDistinctSection && currentAccumulator.length > 0) {
+      sections.push({
+        heading: currentHeading || "System Directive",
+        content: currentAccumulator.join("\n\n"),
+      });
+      currentAccumulator = [];
+      currentHeading = "";
+    }
+
+    if (!currentHeading) {
+      if (mdHeaderMatch) {
+        currentHeading = mdHeaderMatch[1].trim();
+      } else if (labelColonMatch) {
+        currentHeading = labelColonMatch[1].trim();
+      } else if (bracketMatch) {
+        currentHeading = bracketMatch[1].trim();
+      } else if (xmlMatch) {
+        currentHeading = xmlMatch[1].trim();
+      } else if (/^you are\b/i.test(firstLine)) {
+        currentHeading = "Persona & Role Definition";
+      } else {
+        currentHeading = firstLine.slice(0, 45).replace(/[#*`_]/g, "").trim();
+      }
+    }
+
+    currentAccumulator.push(block);
+  }
+
+  if (currentAccumulator.length > 0) {
+    sections.push({
+      heading: currentHeading || "System Directive",
+      content: currentAccumulator.join("\n\n"),
+    });
+  }
+
+  return sections.length > 0 ? sections : [{ heading: "System Instructions", content: trimmed }];
+}
+
+export type ToolDefinitionItem = {
+  toolName: string;
+  description: string;
+  rawJson: string;
+  parametersJson?: string;
+};
+
+export function parseIndividualTools(content: string): ToolDefinitionItem[] {
+  const trimmed = content.trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  // 1. Try JSON.parse directly (in case it is a JSON array)
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (Array.isArray(parsed)) {
+      const items = parsed.map((item, idx) => extractToolInfo(item, idx)).filter(Boolean) as ToolDefinitionItem[];
+      if (items.length > 0) return items;
+    } else if (parsed && typeof parsed === "object") {
+      const single = extractToolInfo(parsed, 0);
+      if (single) return [single];
+    }
+  } catch {
+    // Not a single JSON document, likely multiple JSON documents joined with \n\n
+  }
+
+  // 2. Scan balanced curly braces to extract top-level JSON objects
+  const tools: ToolDefinitionItem[] = [];
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  let startIndex = -1;
+
+  for (let i = 0; i < trimmed.length; i++) {
+    const ch = trimmed[i];
+
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escape = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) {
+      continue;
+    }
+
+    if (ch === "{") {
+      if (depth === 0) {
+        startIndex = i;
+      }
+      depth++;
+    } else if (ch === "}") {
+      depth--;
+      if (depth === 0 && startIndex !== -1) {
+        const slice = trimmed.slice(startIndex, i + 1);
+        startIndex = -1;
+        try {
+          const obj = JSON.parse(slice);
+          const tool = extractToolInfo(obj, tools.length);
+          if (tool) {
+            tools.push(tool);
+          }
+        } catch {
+          // If JSON parse fails, skip
+        }
+      }
+    }
+  }
+
+  return tools;
+}
+
+function extractToolInfo(obj: unknown, fallbackIdx: number): ToolDefinitionItem | null {
+  if (!obj || typeof obj !== "object") {
+    return null;
+  }
+  const record = obj as Record<string, unknown>;
+  const fn = record.function && typeof record.function === "object"
+    ? (record.function as Record<string, unknown>)
+    : record;
+
+  const toolName = typeof fn.name === "string" && fn.name.trim()
+    ? fn.name.trim()
+    : typeof record.name === "string" && record.name.trim()
+      ? record.name.trim()
+      : `tool_${fallbackIdx + 1}`;
+
+  const description = typeof fn.description === "string"
+    ? fn.description.trim()
+    : typeof record.description === "string"
+      ? record.description.trim()
+      : "";
+
+  const params = fn.parameters ?? fn.input_schema ?? record.parameters ?? record.input_schema;
+  const parametersJson = params ? JSON.stringify(params, null, 2) : undefined;
+  const rawJson = JSON.stringify(obj, null, 2);
+
+  return {
+    toolName,
+    description,
+    rawJson,
+    parametersJson,
+  };
+}
+
+export function formatVerdictLabel(verdict: ToolSecondOpinionVerdict): string {
+  switch (verdict) {
+    case "recommended":
+      return "✅ Recommended in Context";
+    case "unnecessary":
+      return "⚠️ Unnecessary in Context";
+    case "bloat":
+      return "⚠️ Context Bloat";
+    case "redundant":
+      return "⚠️ Redundant Tool";
+    case "security_risk":
+      return "🛡️ Security / Mutation Risk";
+    case "caution":
+      return "⚠️ Needs Review";
+  }
+}
+
 export function extractContextSections(
   messages: PromptMessage[],
   options?: { collapseHistory?: boolean },
@@ -191,6 +392,58 @@ export function extractContextSections(
       }
     }
 
+    // Handle tools messages by breaking down into individual tool functions
+    if (msg.role === "tools") {
+      const individualTools = parseIndividualTools(msg.content);
+      if (individualTools.length > 0) {
+        for (let toolIdx = 0; toolIdx < individualTools.length; toolIdx++) {
+          const t = individualTools[toolIdx];
+          const toolTokens = estimateTokens(t.rawJson);
+          const safeName = t.toolName.replace(/[^a-zA-Z0-9_-]/g, "_");
+          sections.push({
+            sectionId: `msg-${i}-tool-${toolIdx}-${safeName}`,
+            messageIndex: i,
+            messageIndices: [i],
+            role: "tools",
+            content: t.rawJson,
+            tokenEstimate: toolTokens,
+            fingerprint: hashText(t.rawJson),
+            heuristicCategory: "schema_tool_spec",
+            toolName: t.toolName,
+            parametersJson: t.parametersJson,
+            preview: `Tool "${t.toolName}": ${t.description || truncatePreview(t.rawJson, 140)}`,
+          });
+        }
+        i += 1;
+        continue;
+      }
+    }
+
+    // Handle system messages with multiple sections
+    if (msg.role === "system") {
+      const subSections = splitSystemSections(msg.content);
+      if (subSections.length > 1) {
+        for (let sysIdx = 0; sysIdx < subSections.length; sysIdx++) {
+          const sub = subSections[sysIdx];
+          const subTokens = estimateTokens(sub.content);
+          sections.push({
+            sectionId: `msg-${i}-sys-${sysIdx}`,
+            messageIndex: i,
+            messageIndices: [i],
+            role: "system",
+            content: sub.content,
+            tokenEstimate: subTokens,
+            fingerprint: hashText(sub.content),
+            heuristicCategory: classifyHeuristicCategory("system", sub.content, false),
+            heading: sub.heading,
+            preview: truncatePreview(sub.content, 200),
+          });
+        }
+        i += 1;
+        continue;
+      }
+    }
+
     // Handle the active user query at lastUserIndex
     if (i === lastUserIndex) {
       const split = splitRagUserQuery(msg.content);
@@ -243,8 +496,9 @@ export function extractContextSections(
       continue;
     }
 
-    // Any other individual message (e.g. system, tools, trailing assistant reply)
+    // Any other individual message (e.g. system single-block, trailing assistant reply)
     const tokens = estimateTokens(msg.content);
+    const heading = msg.role === "system" ? splitSystemSections(msg.content)[0]?.heading : undefined;
     sections.push({
       sectionId: `msg-${i}`,
       messageIndex: i,
@@ -254,6 +508,7 @@ export function extractContextSections(
       tokenEstimate: tokens,
       fingerprint: hashText(msg.content),
       heuristicCategory: classifyHeuristicCategory(msg.role, msg.content, false),
+      heading,
       preview: truncatePreview(msg.content, 200),
     });
     i += 1;
@@ -313,16 +568,24 @@ export const globalTelemetryCache = new TelemetryCache(200);
 export function generateFallbackSectionTelemetry(
   section: ContextSection,
   totalTokens: number,
+  allSections?: ContextSection[],
 ): SectionTelemetry {
   const tokenPercentage = totalTokens > 0 ? Math.round((section.tokenEstimate / totalTokens) * 100) : 0;
   let what = "";
   let why = "";
   let warning: string | undefined;
+  let secondOpinion: ToolSecondOpinion | undefined;
 
   switch (section.heuristicCategory) {
     case "system_instruction":
-      what = "System Guidelines & Persona Specification";
-      why = "Defines assistant persona, behavior rules, and response constraints.";
+      if (section.heading && section.heading !== "System Directive" && section.heading !== "System Instructions") {
+        what = `System Directive: ${section.heading}`;
+        why = `Specifies behavioral directives and operational guidance for ${section.heading.toLowerCase()}.`;
+      } else {
+        const firstLine = section.content.split("\n")[0].trim().replace(/[#*`_]/g, "").slice(0, 45);
+        what = firstLine && firstLine.length > 8 ? `System: ${firstLine}` : "System Guidelines & Persona Specification";
+        why = "Defines assistant persona, behavior rules, and response constraints.";
+      }
       break;
     case "rag_grounding":
       what = "Retrieved Context & Grounding Documents";
@@ -341,10 +604,52 @@ export function generateFallbackSectionTelemetry(
       what = "In-Context Few-Shot Demonstrations";
       why = "Guides output formatting and reasoning pattern by example.";
       break;
-    case "schema_tool_spec":
-      what = "Tool & Function Calling Schemas";
-      why = "Provides tool definitions so the model can invoke external capabilities.";
+    case "schema_tool_spec": {
+      const name = section.toolName || "Custom Tool";
+      what = `Tool: ${name} Function Calling Schema`;
+      why = `Enables model to invoke the ${name} function during completion.`;
+
+      // Analyze tool hygiene heuristically
+      const lowerName = name.toLowerCase();
+      const isVisionTool = /image|vision|photo|ocr|camera|visual/i.test(lowerName);
+      const isDestructive = /delete|drop|destroy|remove|kill|unlink|rm\b/i.test(lowerName);
+
+      // Check if user query mentions images if this is a vision tool
+      const userQueries = (allSections ?? []).filter((s) => s.heuristicCategory === "user_query");
+      const hasImageQuery = userQueries.some((q) =>
+        /image|photo|picture|look at|attachment|file_reference/i.test(q.content),
+      );
+
+      if (isVisionTool && !hasImageQuery) {
+        warning = `Tool '${name}' is in context window but no image inputs were detected in this turn (~${section.tokenEstimate} tokens).`;
+        secondOpinion = {
+          verdict: "unnecessary",
+          verdictLabel: formatVerdictLabel("unnecessary"),
+          advice: `This tool should not be in the prompt window: No image inputs or vision tasks were detected in the active turn. Omit '${name}' from tool definitions to conserve context tokens and reduce model confusion.`,
+        };
+      } else if (isDestructive) {
+        warning = `Tool '${name}' exposes destructive mutations. Ensure authorization is strictly enforced.`;
+        secondOpinion = {
+          verdict: "security_risk",
+          verdictLabel: formatVerdictLabel("security_risk"),
+          advice: `Exposes destructive data operations. Verify that strict confirmation safeguards and scope restrictions are applied before invocation.`,
+        };
+      } else if (section.tokenEstimate > 400 || (section.tokenEstimate > 250 && tokenPercentage >= 35)) {
+        warning = `Tool '${name}' consumes ${section.tokenEstimate} tokens (${tokenPercentage}% of context). Schema may be bloated.`;
+        secondOpinion = {
+          verdict: "bloat",
+          verdictLabel: formatVerdictLabel("bloat"),
+          advice: `High token footprint: Tool schema takes ${section.tokenEstimate} tokens. Consider pruning redundant parameter descriptions or extracting sub-schemas.`,
+        };
+      } else {
+        secondOpinion = {
+          verdict: "recommended",
+          verdictLabel: formatVerdictLabel("recommended"),
+          advice: `Tool function schema is cleanly defined and ready for tool calling.`,
+        };
+      }
       break;
+    }
     case "user_query":
       what = "Active User Prompt";
       why = "Direct instruction for the current completion task.";
@@ -366,6 +671,9 @@ export function generateFallbackSectionTelemetry(
     tokenEstimate: section.tokenEstimate,
     tokenPercentage,
     warning,
+    toolName: section.toolName,
+    heading: section.heading,
+    secondOpinion,
   };
 }
 
@@ -412,10 +720,12 @@ export function buildDeterministicTelemetry(
         messageIndices: section.messageIndices,
         tokenEstimate: section.tokenEstimate,
         tokenPercentage: totalTokens > 0 ? Math.round((section.tokenEstimate / totalTokens) * 100) : 0,
+        toolName: section.toolName ?? cached.toolName,
+        heading: section.heading ?? cached.heading,
       };
     }
-    const fallback = generateFallbackSectionTelemetry(section, totalTokens);
-    if (section.heuristicCategory === "system_instruction" || section.heuristicCategory === "schema_tool_spec") {
+    const fallback = generateFallbackSectionTelemetry(section, totalTokens, sections);
+    if (cache !== globalTelemetryCache) {
       cache.set(section.fingerprint, fallback);
     }
     return fallback;
@@ -436,7 +746,7 @@ export function buildDeterministicTelemetry(
 
 export const TELEMETRY_SYSTEM = [
   "You are Context Tracker's autonomous Context Window Telemetry Engine powered by Meta AI models (Muse Spark 1.3 and Muse Wonder).",
-  "Your mission is to perform architectural decomposition and semantic telemetry on a captured LLM prompt context window.",
+  "Your mission is to perform architectural decomposition, prompt telemetry, and tool hygiene evaluation on a captured LLM prompt context window.",
   "",
   "For each section provided in the prompt context skeleton:",
   "1. Classify its functional category:",
@@ -449,17 +759,22 @@ export const TELEMETRY_SYSTEM = [
   '   - "runtime_data": Dynamic state, session metadata, database rows, or environment variables.',
   "",
   "2. Identify WHAT this section is (concise, technical description, 4-10 words):",
-  '   - Example: "AcmeCorp Support Persona & Brand Safety Policy"',
-  '   - Example: "PostgreSQL Migration Guide (Vector RAG Search Results)"',
+  '   - For system prompt sections: state the specific domain, rule set, or architectural aspect (e.g. "OptimalX Hierarchical Data Model & Routing Rules", "Temporal Anchor & Scope Guardrails"). NEVER give identical generic boilerplate for different system sections.',
+  '   - For tool specifications: name the tool and its primary function (e.g. "search_semantic: Semantic Vector Note & File Retrieval", "describe_image: Local Vision Image Analysis").',
   "",
   "3. Explain WHY this section is included in the context window (prompt engineering rationale, 8-18 words):",
   '   - Example: "Enforces strict JSON output schema and prevents competitor brand mentions."',
   '   - Example: "Grounds troubleshooting instructions with accurate hardware specs for Acme Router 4000."',
-  '   - Example: "Provides conversational memory so model can resolve coreferences to previous steps."',
+  '   - Example: "Enables model to perform semantic retrieval across user notes and workshop files."',
   "",
-  "4. Detect Hygiene Issues or Bloat:",
-  "   - Identify stale dialogue history turns that consume excessive tokens without adding value to the active query.",
-  "   - Flag conflicting instructions or duplicate context blocks.",
+  "4. Provide a SECOND OPINION and Hygiene Audit (CRITICAL FOR TOOLS AND SYSTEM PROMPTS):",
+  '   - For each tool function ("schema_tool_spec"): Evaluate whether this tool actually belongs in the prompt window for the user\'s current task or if it represents context bloat, redundancy, or a security hazard.',
+  '     * If a tool is irrelevant to the active task (e.g. vision/image description tool in a text-only coding conversation, or note-creation tool in a read-only question), set verdict to "unnecessary" or "bloat" and explain why in advice.',
+  '     * If multiple tools overlap in function, set verdict to "redundant".',
+  '     * If a tool exposes dangerous file mutations or execution without confirmation, set verdict to "caution" or "security_risk".',
+  '     * If the tool is appropriate and useful for the task, set verdict to "recommended".',
+  '   - For system prompt sections: detect conflicting instructions, outdated rules, duplicate guidelines, or bloated formatting constraints.',
+  '   - For dialogue history: flag stale turns consuming token budget without relevance to the active query.',
   "",
   "Respond with ONLY a valid JSON object matching this schema:",
   "{",
@@ -469,10 +784,14 @@ export const TELEMETRY_SYSTEM = [
   '      "category": "system_instruction" | "rag_grounding" | "chat_history" | "few_shot_exemplar" | "schema_tool_spec" | "user_query" | "runtime_data",',
   '      "what": "string (concise technical identity, 4-10 words)",',
   '      "why": "string (prompt engineering rationale, 8-18 words)",',
-  '      "warning": "optional string (hygiene, bloat, or conflict advisory)"',
+  '      "warning": "optional string (hygiene, bloat, or conflict advisory)",',
+  '      "secondOpinion": {',
+  '        "verdict": "recommended" | "unnecessary" | "bloat" | "redundant" | "security_risk" | "caution",',
+  '        "advice": "string (Meta AI second opinion on whether this tool or section belongs in the prompt window, 10-30 words)"',
+  '      }',
   "    }",
   "  ],",
-  '  "warnings": ["optional general context bloat or conflict advisory strings"]',
+  '  "warnings": ["general context bloat, token waste, or prompt hygiene advisory strings"]',
   "}",
 ].join("\n");
 
@@ -482,6 +801,8 @@ export type TelemetrySkeletonItem = {
   role: string;
   tokenEstimate: number;
   turns?: number;
+  toolName?: string;
+  heading?: string;
   preview: string;
 };
 
@@ -492,6 +813,8 @@ export function buildTelemetrySkeleton(sections: ContextSection[]): string {
     role: sec.role,
     tokenEstimate: sec.tokenEstimate,
     turns: sec.turns,
+    toolName: sec.toolName,
+    heading: sec.heading,
     preview: redactText(sec.preview),
   }));
   return JSON.stringify(items, null, 2);
@@ -503,6 +826,7 @@ export type TelemetryModelSection = {
   what: string;
   why: string;
   warning?: string;
+  secondOpinion?: ToolSecondOpinion;
 };
 
 export type TelemetryResponse = {
@@ -544,13 +868,44 @@ export function parseTelemetryResponse(raw: string): TelemetryResponse | null {
         : "runtime_data";
       const what = typeof item.what === "string" && item.what.trim() ? item.what.trim() : "Context Section";
       const why = typeof item.why === "string" && item.why.trim() ? item.why.trim() : "Supplies context for completion.";
-      const warning = typeof item.warning === "string" && item.warning.trim() ? item.warning.trim() : undefined;
+      let warning = typeof item.warning === "string" && item.warning.trim() ? item.warning.trim() : undefined;
+
+      let secondOpinion: ToolSecondOpinion | undefined;
+      if (item.secondOpinion && typeof item.secondOpinion === "object") {
+        const rawVerdict = String((item.secondOpinion as any).verdict || "").toLowerCase();
+        const verdict: ToolSecondOpinionVerdict =
+          rawVerdict === "unnecessary" ||
+          rawVerdict === "bloat" ||
+          rawVerdict === "redundant" ||
+          rawVerdict === "security_risk" ||
+          rawVerdict === "caution" ||
+          rawVerdict === "recommended"
+            ? (rawVerdict as ToolSecondOpinionVerdict)
+            : warning
+              ? "caution"
+              : "recommended";
+
+        const advice =
+          typeof (item.secondOpinion as any).advice === "string" ? (item.secondOpinion as any).advice.trim() : "";
+        if (advice) {
+          secondOpinion = {
+            verdict,
+            verdictLabel: formatVerdictLabel(verdict),
+            advice,
+          };
+          if (!warning && verdict !== "recommended") {
+            warning = advice;
+          }
+        }
+      }
+
       validSections.push({
         sectionId,
         category,
         what,
         why,
         warning,
+        secondOpinion,
       });
     }
     const warnings = Array.isArray(parsed.warnings)
@@ -595,6 +950,10 @@ export function applyTelemetryResponse(
         tokenEstimate: sec.tokenEstimate,
         tokenPercentage,
         warning: fromModel.warning,
+        toolName: sec.toolName,
+        heading: sec.heading,
+        secondOpinion: fromModel.secondOpinion,
+        fromModel: true,
       };
       cache.set(sec.fingerprint, item);
       return item;
@@ -610,14 +969,13 @@ export function applyTelemetryResponse(
         messageIndices: sec.messageIndices,
         tokenEstimate: sec.tokenEstimate,
         tokenPercentage: totalTokens > 0 ? Math.round((sec.tokenEstimate / totalTokens) * 100) : 0,
+        toolName: sec.toolName ?? cached.toolName,
+        heading: sec.heading ?? cached.heading,
       };
     }
 
     // 3. Fallback
-    const fallback = generateFallbackSectionTelemetry(sec, totalTokens);
-    if (sec.heuristicCategory === "system_instruction" || sec.heuristicCategory === "schema_tool_spec") {
-      cache.set(sec.fingerprint, fallback);
-    }
+    const fallback = generateFallbackSectionTelemetry(sec, totalTokens, sections);
     return fallback;
   });
 

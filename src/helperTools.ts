@@ -17,7 +17,9 @@ import type {
   AndroidEnvironment,
   AndroidSecurityResult,
   AttributedSpan,
+  ContextScope,
 } from "./types";
+import { type CaptureInput, getOrExtractSections } from "./contextTools";
 
 const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "out", "__pycache__", ".venv", "venv"]);
 const MAX_FILE = 200_000;
@@ -1022,3 +1024,157 @@ export function findUserConfigDirs(
   lines.push(`\nUse read_file with any of the above file paths to inspect active configuration.`);
   return lines.join("\n");
 }
+
+/**
+ * Builds a token-efficient structural skeleton summary of the context window.
+ */
+export function buildContextSkeleton(capture: CaptureInput): string {
+  const sections = getOrExtractSections(capture);
+  const totalTokens = sections.reduce((sum, s) => sum + s.tokenEstimate, 0);
+
+  const lines: string[] = [];
+  lines.push(`Total Sections: ${sections.length} | Estimated Total Prompt Tokens: ~${totalTokens}`);
+
+  for (let idx = 0; idx < sections.length; idx++) {
+    const s = sections[idx];
+    const telem = capture.telemetry?.sections.find(
+      (ts) => ts.sectionId === s.sectionId || (ts.messageIndices ? ts.messageIndices.includes(s.messageIndex) : ts.messageIndex === s.messageIndex),
+    );
+    const cat = telem?.categoryLabel || s.heuristicCategory;
+    const pct = totalTokens > 0 ? Math.round((s.tokenEstimate / totalTokens) * 100) : 0;
+    const roleUpper = s.role.toUpperCase();
+
+    let entry = `[Section #${idx + 1}: ${s.sectionId}] Role: ${roleUpper} | Category: ${cat} | Tokens: ~${s.tokenEstimate} (${pct}%)`;
+    if (telem?.what) {
+      entry += `\n  - WHAT: ${telem.what}`;
+    }
+    if (telem?.why) {
+      entry += `\n  - WHY: ${telem.why}`;
+    }
+    const previewText = redactText((s.preview || s.content || "").slice(0, 160).replace(/\r?\n/g, " "));
+    entry += `\n  - Preview: "${previewText}"`;
+    lines.push(entry);
+  }
+
+  return lines.join("\n\n");
+}
+
+export type ContextCopilotSystemOptions = {
+  projectName?: string;
+  projectPath?: string;
+  captureId?: string;
+  model?: string;
+  provider?: string;
+  totalTokens?: number;
+  scope?: ContextScope;
+  scopeDescription?: string;
+  contextSkeleton?: string;
+  compareId?: string;
+  compareModel?: string;
+  compareTotalTokens?: number;
+  compareSkeleton?: string;
+};
+
+/**
+ * Formulates the grounded system prompt for Context Tracker's Prompt Co-Pilot.
+ */
+export function buildContextCopilotSystem(options: ContextCopilotSystemOptions): string {
+  let scopeText = options.scopeDescription || "";
+  if (!scopeText && options.scope) {
+    if (options.scope.kind === "section") {
+      scopeText = `Section '${options.scope.sectionId || "unknown"}' (${options.scope.categoryLabel || options.scope.category || "section"}) - ${options.scope.label || ""}`;
+    } else if (options.scope.kind === "selection") {
+      scopeText = `Highlighted Text Selection (${options.scope.charCount || 0} characters): "${(options.scope.selectedText || "").slice(0, 200)}"`;
+    } else if (options.scope.kind === "compare") {
+      scopeText = `Comparative Interrogation: Comparing active capture with '${options.scope.compareCaptureId || options.compareId || "comparison capture"}'`;
+    } else {
+      scopeText = `All Context (Global Prompt Window, ~${options.totalTokens || 0} tokens)`;
+    }
+  }
+  if (!scopeText) {
+    scopeText = "All Context (Global Prompt Window)";
+  }
+
+  const comparisonSection = options.compareId && options.compareSkeleton
+    ? [
+        "",
+        "### COMPARISON CAPTURE GROUNDING",
+        `Comparison Capture ID: ${options.compareId} | Model: ${options.compareModel || "Unknown"} | Estimated Tokens: ~${options.compareTotalTokens || 0}`,
+        options.compareSkeleton,
+        "",
+        "Use `diff_captures` to inspect structural differences, token deltas, and prompt divergences between these two captures.",
+      ].join("\n")
+    : "";
+
+  return [
+    "You are Context Tracker's Prompt Co-Pilot powered by Meta AI models (Muse Spark 1.3 and Muse Wonder).",
+    "You possess deep expertise in LLM prompt engineering, context optimization, RAG grounding, and prompt debugging.",
+    "",
+    `Project: ${options.projectName || "Unknown"} (${options.projectPath || ""})`,
+    options.captureId ? `Selected Capture: ${options.captureId}` : "",
+    options.model ? `Model: ${options.model} | Provider: ${options.provider || "Unknown"} | Total Estimated Tokens: ~${options.totalTokens || 0}` : "",
+    "",
+    "### ACTIVE SCOPE",
+    scopeText,
+    "",
+    "### CONTEXT SKELETON",
+    options.contextSkeleton || "No context sections available.",
+    comparisonSection,
+    "",
+    "### SENSORY TOOLS AVAILABLE",
+    "- search_context(query, sectionId?, targetCapture?, caseSensitive?): Search across prompt messages and context sections for keywords, variable names, instructions, or regex patterns.",
+    "- read_context_section(sectionId, startLine?, maxLines?): Read verbatim lines from a specific section without blowing the token budget.",
+    "- inspect_code_template(sectionId): Inspect the source code template, prompt builder, or dynamic variable slots in the developer's workspace that generated this context section.",
+    "- propose_template_patch(file, startLine, endLine, originalCode, replacementCode, explanation, tokenImpactEstimate?): Propose a concrete, actionable source code diff patch to fix contradictions or bloat.",
+    options.compareId ? "- diff_captures(): Compute structural differences, status code comparisons, token shifts, and RAG divergences between the primary and comparison captures." : "",
+    "- detect_local_services, find_user_config_dirs, search_text, read_file, list_files: Workspace sensory tools.",
+    "- respond(message): Provide your final response, explanation, or advice directly to the user in clean Markdown.",
+    "",
+    "### CONVERSATIONAL PROTOCOL & INSTRUCTIONS",
+    "You are a collaborative AI prompt engineering co-pilot. Developers converse with you to understand prompt context, diagnose regressions, and discuss trade-offs.",
+    "",
+    "1. Grounding First: Never guess what the context contains. Always use `search_context` and `read_context_section` to inspect actual prompt content before making assertions.",
+    "",
+    "2. Converse & Explain What & Why:",
+    "   - Always explain WHAT is happening in the context window with specific citations (section IDs, line numbers, variable names).",
+    "   - Always explain WHY the issue occurred (e.g. conflicting directives between system rules and retrieved RAG context, token explosion from dialogue backlog, prompt injection vulnerabilities).",
+    "   - Discuss Alternatives: Always present 2–3 different approaches or trade-offs for how the developer could solve the problem (e.g., Option A: rephrase system prompt rule; Option B: filter or re-rank RAG documents; Option C: prune dialogue turns).",
+    "",
+    "3. Actionable Proposals (Optional):",
+    "   - If one of the solutions involves modifying a source template or file in the workspace, you may call `inspect_code_template` and `propose_template_patch` to draft an actionable diff.",
+    "   - NEVER just silently propose a patch and stop without explaining! A patch is an optional tool. You MUST ALWAYS deliver a full conversational response via `respond` explaining your diagnosis, why this happened, the alternative options, and why the patch was formulated.",
+    "",
+    options.compareId ? "4. Comparative Inquiries: When asked why one capture behaved differently from another, call `diff_captures` first to inspect model/status differences, prompt deltas, and RAG additions." : "",
+    "5. Delivery: Deliver your final response via the `respond` tool, presenting clean markdown with specific citations, bullet points, and actionable next steps.",
+  ].filter(Boolean).join("\n");
+}
+
+export function buildDetectContradictionsPrompt(scope?: ContextScope): string {
+  const scopeSuffix = scope?.sectionId ? ` within section ${scope.sectionId}` : "";
+  return `Analyze this prompt context window${scopeSuffix} for contradictions or conflicting instructions between system rules, dynamic data (retrieved RAG context), and user queries. Pinpoint exact conflicting lines, explain what is happening and why the conflict arose, present alternative approaches we could take, and discuss what we could do differently.`;
+}
+
+export function buildOptimizeContextPrompt(scope?: ContextScope): string {
+  const scopeSuffix = scope?.sectionId ? ` for section ${scope.sectionId}` : "";
+  return `Audit this prompt context window${scopeSuffix} for context bloat, redundant dialogue history, or oversized tool schemas. Explain where the token budget is going, why it happens, and present 2-3 specific options for how to prune or compress it.`;
+}
+
+export function buildScanPiiPrompt(scope?: ContextScope): string {
+  const scopeSuffix = scope?.sectionId ? ` for section ${scope.sectionId}` : "";
+  return `Audit this prompt context${scopeSuffix} for accidental data leaks, unmasked secrets/tokens, personal identifiable information (PII), or prompt injection vulnerabilities. Explain any findings, the risks, and what precautions or masking we should implement.`;
+}
+
+export function buildExplainOutputPrompt(reply?: string): string {
+  if (reply && reply.trim()) {
+    return `Analyze the model's generated response against the prompt context: which specific system guidelines, RAG documents, or few-shot examples most directly produced or influenced this response:\n"""\n${redactText(reply.slice(0, 500))}\n"""`;
+  }
+  return `Analyze the model's generated response against the prompt context: which specific system guidelines, RAG documents, or few-shot examples most directly produced or influenced this output?`;
+}
+
+export function buildCompareCapturesPrompt(
+  captureA: { id: string; model?: string; totalTokens?: number },
+  captureB: { id: string; model?: string; totalTokens?: number },
+): string {
+  return `Compare Capture A (${captureA.id}, model: ${captureA.model || "unknown"}, ~${captureA.totalTokens || 0} tokens) against Capture B (${captureB.id}, model: ${captureB.model || "unknown"}, ~${captureB.totalTokens || 0} tokens). Identify the key prompt divergences, injected context differences, or token changes between them, and explain how they affect the model's behavior.`;
+}
+

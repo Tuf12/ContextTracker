@@ -1,5 +1,6 @@
 import { deriveMessageSpans } from "./matcher";
 import { readableReply } from "./parse";
+import { extractContextSections } from "./telemetry";
 import type { CaptureView, ProjectIndex, StoredCapture, ViewMessage } from "./types";
 
 const ROLE_LABELS: Record<string, string> = {
@@ -13,7 +14,8 @@ const ROLE_LABELS: Record<string, string> = {
 
 export function deriveCapture(capture: StoredCapture, index: ProjectIndex | null): CaptureView {
   const telemetry = capture.telemetry;
-  const messages: ViewMessage[] = capture.messages.map((message, messageIndex) => {
+  const sourceMessages = Array.isArray(capture.messages) ? capture.messages : [];
+  const messages: ViewMessage[] = sourceMessages.map((message, messageIndex) => {
     const reported = (capture.reported ?? []).filter((span) => {
       if (span.messageIndex === undefined) {
         return Boolean(span.quote) || messageIndex === 0;
@@ -24,23 +26,26 @@ export function deriveCapture(capture: StoredCapture, index: ProjectIndex | null
       ...span,
       id: `${messageIndex}-${spanIndex}`,
     }));
-    const messageTelemetry = telemetry?.sections.find(
+    const messageTelemetries = telemetry?.sections.filter(
       (sec) => sec.messageIndex === messageIndex || sec.messageIndices?.includes(messageIndex),
-    );
+    ) ?? [];
+    const messageTelemetry = messageTelemetries[0];
     return {
       role: message.role,
       roleLabel: ROLE_LABELS[message.role] ?? message.role,
       truncated: message.truncated,
       spans,
       telemetry: messageTelemetry,
+      telemetries: messageTelemetries,
     };
   });
-  const reply = readableReply(capture.reply);
-  const promptChars = capture.messages.reduce((sum, message) => sum + message.content.length, 0);
+  const reply = readableReply(typeof capture.reply === "string" ? capture.reply : "");
+  const promptChars = sourceMessages.reduce((sum, message) => sum + (message.content?.length ?? 0), 0);
   const fileSpanCount = messages.reduce(
     (sum, message) => sum + message.spans.filter((span) => span.kind === "file").length,
     0,
   );
+  const sections = extractContextSections(capture.messages);
   return {
     id: capture.id,
     createdAt: capture.createdAt,
@@ -56,6 +61,7 @@ export function deriveCapture(capture: StoredCapture, index: ProjectIndex | null
     reply,
     fileSpanCount,
     telemetry,
+    sections,
   };
 }
 
@@ -63,6 +69,7 @@ export function presentCapture(capture: CaptureView): CaptureView {
   return {
     ...capture,
     telemetry: capture.telemetry,
+    sections: capture.sections,
     messages: capture.messages.map((message) => ({
       ...message,
       spans: message.spans.map((span) => {

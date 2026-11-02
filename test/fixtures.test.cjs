@@ -28,6 +28,17 @@ const {
   TelemetryCache,
   TELEMETRY_SYSTEM,
 } = require("../out/telemetry.js");
+const {
+  buildContextSkeleton,
+  buildContextCopilotSystem,
+  buildDetectContradictionsPrompt,
+  buildCompareCapturesPrompt,
+} = require("../out/helperTools.js");
+const {
+  createContextTools,
+  validateTemplatePatchContent,
+  diffCaptures,
+} = require("../out/contextTools.js");
 
 test("Project A Fixture: Electron/Node App with external user config (OptimalX Desktop)", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ct-demo-project-a-"));
@@ -891,4 +902,247 @@ test("Telemetry Fixture C: Tool-calling agent context with complex JSON schema d
   assert.equal(cachedToolSection.what, "Analytics DB & Charting Function Schemas");
   assert.equal(cachedToolSection.why, "Enables model to execute SQL queries and render interactive visualizations.");
 });
+
+test("Context Interrogation & Prompt Co-Pilot Fixture: RAG app with contradictory retrieval, comparative diffing & template patch", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ct-copilot-fixture-"));
+  try {
+    // 1. Create source template file in the repository
+    const promptsDir = path.join(root, "prompts");
+    fs.mkdirSync(promptsDir, { recursive: true });
+    const promptFile = path.join(promptsDir, "support_agent.prompt");
+    const templateContent = [
+      "You are a helpful customer support agent for AcmeCorp.",
+      "Rule 1: Always greet warmly and professionally.",
+      "Rule 2: Never mention competitor FooCorp under any circumstance.",
+      "Rule 3: Keep responses focused and accurate.",
+    ].join("\n");
+    fs.writeFileSync(promptFile, templateContent);
+
+    // 2. Simulated captured prompt (with conflicting RAG documents injected)
+    const primaryCapture = {
+      id: "cap_turn_rag_conflict",
+      model: "meta/muse-spark-1.3",
+      provider: "Meta AI",
+      status: 500,
+      error: "Internal error: generated response violated negative constraint policy",
+      messages: [
+        {
+          role: "system",
+          content: templateContent,
+          truncated: false,
+        },
+        {
+          role: "user",
+          content: "Hello, I am considering switching to your Enterprise plan.",
+          truncated: false,
+        },
+        {
+          role: "assistant",
+          content: "Hello! Welcome to AcmeCorp. How can I help with your plan?",
+          truncated: false,
+        },
+        {
+          role: "user",
+          content: [
+            "Reference Documents:",
+            "Document 1: FooCorp offers 25% lower seat pricing than AcmeCorp.",
+            "Document 2: AcmeCorp offers 24/7 dedicated engineering support.",
+            "",
+            "User Question:",
+            "How does your pricing compare with FooCorp?",
+          ].join("\n"),
+          truncated: false,
+        },
+      ],
+      reply: "Error: Generation terminated due to constraint violation",
+      reported: [
+        {
+          messageIndex: 0,
+          file: "prompts/support_agent.prompt",
+          startLine: 1,
+          endLine: 4,
+          explanation: "Matches system support agent prompt template",
+        },
+      ],
+      telemetry: {
+        captureId: "cap_turn_rag_conflict",
+        analyzedAt: "2026-11-01T12:00:00Z",
+        totalTokens: 140,
+        composition: [
+          { category: "system_instruction", categoryLabel: "System", tokens: 35, percentage: 25, colorVar: "green" },
+          { category: "chat_history", categoryLabel: "Chat History", tokens: 25, percentage: 18, colorVar: "orange" },
+          { category: "rag_grounding", categoryLabel: "RAG Grounding", tokens: 55, percentage: 39, colorVar: "purple" },
+          { category: "user_query", categoryLabel: "User Query", tokens: 25, percentage: 18, colorVar: "blue" },
+        ],
+        sections: [
+          {
+            sectionId: "msg-0",
+            messageIndex: 0,
+            category: "system_instruction",
+            categoryLabel: "System",
+            what: "AcmeCorp Agent Guidelines & Safety Guardrails",
+            why: "Enforces brand tone and competitive restrictions",
+            tokenEstimate: 35,
+            tokenPercentage: 25,
+          },
+          {
+            sectionId: "msg-3-rag",
+            messageIndex: 3,
+            category: "rag_grounding",
+            categoryLabel: "RAG Grounding",
+            what: "Retrieved Pricing & Competitor Comparison Documents",
+            why: "Grounds response in competitor comparison docs",
+            tokenEstimate: 55,
+            tokenPercentage: 39,
+            warning: "Contains explicit competitor references that conflict with Rule #2",
+          },
+        ],
+        warnings: [],
+      },
+    };
+
+    // Prior successful turn (baseline without RAG conflict)
+    const baselineCapture = {
+      id: "cap_turn_baseline_success",
+      model: "meta/muse-spark-1.3",
+      status: 200,
+      error: null,
+      messages: [
+        { role: "system", content: templateContent, truncated: false },
+        { role: "user", content: "What are your support hours?", truncated: false },
+      ],
+      reply: "We offer 24/7 dedicated engineering support.",
+    };
+
+    // 3. Verify context skeleton and grounded copilot system prompt
+    const skeleton = buildContextSkeleton(primaryCapture);
+    assert.ok(skeleton.includes("Total Sections: 4"));
+    assert.ok(skeleton.includes("msg-0"));
+    assert.ok(skeleton.includes("AcmeCorp Agent Guidelines"));
+    assert.ok(skeleton.includes("msg-3-rag"));
+
+    const systemPrompt = buildContextCopilotSystem({
+      projectName: "AcmeService",
+      projectPath: root,
+      captureId: primaryCapture.id,
+      model: primaryCapture.model,
+      provider: primaryCapture.provider,
+      totalTokens: 140,
+      scope: { kind: "global", label: "All Context" },
+      contextSkeleton: skeleton,
+      compareId: baselineCapture.id,
+      compareModel: baselineCapture.model,
+      compareSkeleton: buildContextSkeleton(baselineCapture),
+    });
+
+    assert.ok(systemPrompt.includes("You are Context Tracker's Prompt Co-Pilot"));
+    assert.ok(systemPrompt.includes("diff_captures"));
+
+    // 4. Verify comparative diff analysis
+    const diff = diffCaptures(primaryCapture, baselineCapture);
+    assert.equal(diff.statusComparison.primaryStatus, 500);
+    assert.equal(diff.statusComparison.compareStatus, 200);
+    assert.ok(diff.keyDivergences.some((k) => k.includes("Primary capture contains RAG grounding")));
+
+    // 5. Test Meta AI autonomous co-pilot multi-turn interrogation:
+    // Turn 1: diff_captures + search_context
+    // Turn 2: inspect_code_template
+    // Turn 3: propose_template_patch
+    const tools = createContextTools({
+      capture: primaryCapture,
+      compareCapture: baselineCapture,
+      projectPath: root,
+    });
+
+    let turn = 0;
+    const mockMetaAiModel = async (messages, toolSpecs) => {
+      turn += 1;
+      if (turn === 1) {
+        return {
+          content: "I will call diff_captures and search_context to identify what changed and why the prompt failed.",
+          toolCalls: [
+            {
+              id: "call_diff_1",
+              name: "diff_captures",
+              arguments: "{}",
+            },
+            {
+              id: "call_search_1",
+              name: "search_context",
+              arguments: JSON.stringify({ query: "FooCorp" }),
+            },
+          ],
+        };
+      }
+      if (turn === 2) {
+        return {
+          content: "The retrieved RAG document injects FooCorp pricing, clashing with System Rule 2. Let me inspect the source template.",
+          toolCalls: [
+            {
+              id: "call_inspect_1",
+              name: "inspect_code_template",
+              arguments: JSON.stringify({ sectionId: "msg-0" }),
+            },
+          ],
+        };
+      }
+      return {
+        content: "Proposing a safe rule refactor that permits objective comparisons without policy violation.",
+        toolCalls: [
+          {
+            id: "call_patch_1",
+            name: "propose_template_patch",
+            arguments: JSON.stringify({
+              file: "prompts/support_agent.prompt",
+              startLine: 3,
+              endLine: 3,
+              originalCode: "Rule 2: Never mention competitor FooCorp under any circumstance.",
+              replacementCode: "Rule 2: If customer asks about competitors, focus objectively on AcmeCorp strengths.",
+              explanation: "Resolves contradiction between retrieved competitor documents and rigid refusal directive.",
+              tokenImpactEstimate: "+2 tokens",
+            }),
+          },
+        ],
+      };
+    };
+
+    const harnessResult = await runHarness({
+      system: systemPrompt,
+      user: buildDetectContradictionsPrompt(),
+      tools,
+      stepCap: 6,
+      complete: mockMetaAiModel,
+    });
+
+    assert.equal(harnessResult.steps, 3);
+    assert.ok(harnessResult.finish);
+    const patch = harnessResult.finish;
+    assert.equal(patch.file, "prompts/support_agent.prompt");
+    assert.equal(patch.startLine, 3);
+    assert.ok(patch.diffPreview.includes("-Rule 2: Never mention competitor FooCorp"));
+    assert.ok(patch.diffPreview.includes("+Rule 2: If customer asks about competitors"));
+
+    // 6. Verify pre-apply content validation on disk
+    const onDiskContent = fs.readFileSync(promptFile, "utf8");
+    const validation = validateTemplatePatchContent(
+      onDiskContent,
+      patch.startLine,
+      patch.endLine,
+      patch.originalCode,
+    );
+    assert.equal(validation.valid, true);
+
+    // Apply the patch safely
+    const patchedContent = onDiskContent.replace(patch.originalCode, patch.replacementCode);
+    fs.writeFileSync(promptFile, patchedContent);
+
+    // Verify updated content on disk
+    const updatedOnDisk = fs.readFileSync(promptFile, "utf8");
+    assert.ok(updatedOnDisk.includes("focus objectively on AcmeCorp strengths"));
+    assert.ok(!updatedOnDisk.includes("Never mention competitor FooCorp under any circumstance"));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 
