@@ -4,7 +4,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const { runHarness } = require("../out/harness.js");
-const { completeChat, helperChatUrl, listHelperModels, modelIdsFromResponse } = require("../out/helperClient.js");
+const { completeChat, helperChatUrl, listHelperModels, modelIdsFromResponse, sanitizeMessagesForHelperApi } = require("../out/helperClient.js");
 const { ADDRESS_SYSTEM, addressTools, ATTRIBUTION_SYSTEM, attributionTools, attributePrompt, buildAttributionUserPrompt, buildDiagnosticUserPrompt, buildHelperUserPrompt, detectLocalServices, detectSourceConfigFile, diagnosticTools, findUserConfigDirs, inferAppHints, KNOWN_LOCAL_SERVICES, probePort, proposeAddress, searchText } = require("../out/helperTools.js");
 const { expandHomeDir, isHomeConfigPath } = require("../out/paths.js");
 const { redactText } = require("../out/redact.js");
@@ -158,6 +158,31 @@ test("helper requests use the chat endpoint and errors omit the API key", async 
       return true;
     },
   );
+});
+
+test("sanitizeMessagesForHelperApi drops broken tool turns and normalizes null content", () => {
+  const cleaned = sanitizeMessagesForHelperApi([
+    { role: "user", content: "Analyze contradictions" },
+    {
+      role: "assistant",
+      content: null,
+      tool_calls: [{ id: "call_respond_1", type: "function", function: { name: "respond", arguments: "{}" } }],
+    },
+    { role: "user", content: "follow up" },
+  ]);
+  assert.equal(cleaned.length, 2);
+  assert.equal(cleaned[0].role, "user");
+  assert.equal(cleaned[0].content, "Analyze contradictions");
+  assert.equal(cleaned[1].role, "user");
+  assert.equal(cleaned[1].content, "follow up");
+
+  const fixed = sanitizeMessagesForHelperApi([
+    { role: "assistant", content: null, tool_calls: [{ id: "t1", type: "function", function: { name: "respond", arguments: "{}" } }] },
+    { role: "tool", content: "ok", tool_call_id: "t1" },
+  ]);
+  assert.equal(fixed.length, 2);
+  assert.equal(fixed[0].content, "");
+  assert.equal(fixed[1].role, "tool");
 });
 
 test("search_text supports literal, regex, and multi-query array with redaction", () => {

@@ -1,8 +1,10 @@
 # Context Tracker — Meta Global AI Developer Hackathon Showcase & Demonstration Guide
 
-> **Submission Track:** Best Agentic Use-Case ($5,000 Bonus) & General Track  
+> **Submission Track:** Indie Developer Track & Best Agentic Use-Case Award  
+> **Problem Statement:** Build for Your World  
 > **Core AI Models:** Meta Muse Spark 1.3 & Meta Muse Wonder (Meta Model API)  
 > **Extension:** Context Tracker for VS Code & Cursor  
+> **Demo Video:** [3-Minute Video Walkthrough (YouTube/Loom)](#)  
 
 ---
 
@@ -176,7 +178,7 @@ Context Tracker includes a comprehensive multi-framework demonstration suite (`t
   *Look at that: Meta AI flags that our system prompt strictly forbade mentioning competitor FooCorp, but our vector database retrieved a FooCorp pricing comparison!*  
   *Even better, Meta AI inspects the source template and generates an actionable diff. We click **'Apply Patch to Workspace'**—and Context Tracker patches `support_agent.prompt` directly in VS Code. Observability to resolution in 10 seconds!"*
 
-### **[2:30 - 2:45] Autonomous Self-Healing Diagnostic Loop ($5,000 Best Agentic Use-Case)**
+### **[2:30 - 2:45] Autonomous Self-Healing Diagnostic Loop (Best Agentic Use-Case)**
 - **Visual:** Switch to an app with an in-tree default fallback and an external `~/.config` file. Click "Start capture". Watchdog displays *"Listening idle · 0 requests received"*. Click **"Troubleshoot Connection"**.
 - **Presenter (Voiceover):**  
   *"And if an application has a hidden configuration hierarchy, our Traffic Watchdog detects zero requests and engages the self-healing loop.*  
@@ -195,7 +197,7 @@ Context Tracker includes a comprehensive multi-framework demonstration suite (`t
 | Criteria | Target | Implementation in Context Tracker |
 | :--- | :--- | :--- |
 | **Use of Meta AI Tooling (25%)** | Core Product Brain | Meta Muse Spark 1.3 & Muse Wonder drive all architecture analysis, sensory probing, self-healing diagnostics, semantic prompt attribution (Loop 4), context window anatomy telemetry (Loop 6), and conversational co-pilot context interrogation with direct codebase patching (Loop 8). |
-| **Best Agentic Use-Case ($5,000 Bonus)** | Full Multi-Step Autonomy | Autonomous multi-loop agent: connection reconnaissance, sensory environment grounding, self-healing watchdog, dynamic template reverse-engineering, context window semantic profiling, and closed-loop prompt debugging with workspace patching. |
+| **Best Agentic Use-Case Award** | Full Multi-Step Autonomy | Autonomous multi-loop agent: connection reconnaissance, sensory environment grounding, self-healing watchdog, dynamic template reverse-engineering, context window semantic profiling, and closed-loop prompt debugging with workspace patching. |
 | **Speed to Connect & Attribute** | ≤ 2 turns | Parallel tool calling resolves endpoints, prompt template origins, and context contradictions in 1–2 model turns without human configuration. |
 | **Reliability & Grounding** | 0 Hallucinations | Sensory tools (`detect_local_services`, `find_user_config_dirs`, `search_text`, `read_context_section`, `inspect_code_template`) ground the model in real local machine, context window, and codebase state. |
 | **Security & Privacy** | 0 Secrets Leaked | Multi-layer regex redaction of keys/passwords, file sandboxing, and zero residual file footprint on stop. |

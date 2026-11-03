@@ -4,6 +4,27 @@
   "description": "Capture the prompt a project sends to a model and open each matching slice in the source file it came from.",
   "version": "0.1.0",
   "publisher": "context-tracker",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Tuf12/ContextTracker.git"
+  },
+  "homepage": "https://github.com/Tuf12/ContextTracker#readme",
+  "bugs": {
+    "url": "https://github.com/Tuf12/ContextTracker/issues"
+  },
+  "keywords": [
+    "ai",
+    "llm",
+    "meta-ai",
+    "muse-spark",
+    "muse-wonder",
+    "prompt-debugging",
+    "context-window",
+    "telemetry",
+    "rag",
+    "agentic"
+  ],
   "engines": {
     "vscode": "^1.85.0"
   },

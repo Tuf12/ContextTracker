@@ -856,11 +856,15 @@ export function createContextTools(options: {
           });
 
           onPatchProposed?.(patch);
-          const shouldFinish = finishOnPatch ?? !onPatchProposed;
+          if (finishOnPatch) {
+            return {
+              content: `Template patch proposal created successfully for ${patch.file}:${patch.startLine}-${patch.endLine}.\n\nDiff preview:\n${patch.diffPreview}\n\nCRITICAL NEXT STEP: You must now explain to the user in conversational detail what was happening in their prompt context, why this issue occurred, alternative approaches they could take, and why this patch was proposed. Deliver your final response to the user via respond().`,
+              finish: patch,
+            };
+          }
 
           return {
-            content: `Template patch proposal created successfully for ${patch.file}:${patch.startLine}-${patch.endLine}.\n\nDiff preview:\n${patch.diffPreview}\n\nCRITICAL NEXT STEP: You must now explain to the user in conversational detail what was happening in their prompt context, why this issue occurred, alternative approaches they could take, and why this patch was proposed. Deliver your final response to the user via respond().`,
-            finish: shouldFinish ? patch : undefined,
+            content: `Template patch proposal created successfully for ${patch.file}:${patch.startLine}-${patch.endLine}.\n\nDiff preview:\n${patch.diffPreview}\n\nCRITICAL NEXT STEP: You must now explain to the user in conversational detail what was happening in their prompt context, why this issue occurred, alternative approaches they could take, and why this patch was proposed. Deliver your final response to the user via respond(). You may propose additional patches in parallel before calling respond().`,
           };
         } catch (err) {
           return { content: err instanceof Error ? err.message : String(err) };

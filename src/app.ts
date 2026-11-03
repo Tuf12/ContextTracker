@@ -4,7 +4,7 @@ import path from "path";
 import * as vscode from "vscode";
 import { deriveCapture, presentCapture } from "./derive";
 import { ANTHROPIC_ENV, applyEnv, OPENAI_ENV, proposedBases, readEnvStatus, restoreEnv } from "./env";
-import { completeChat, listHelperModels, META_HELPER_BASE, META_MODELS, type ChatMessage } from "./helperClient";
+import { completeChat, listHelperModels, META_HELPER_BASE, META_MODELS, sanitizeMessagesForHelperApi, type ChatMessage } from "./helperClient";
 import {
   ADDRESS_SYSTEM,
   addressTools,
@@ -446,6 +446,9 @@ export class TrackerApp {
           typeof body.patchId === "string" ? body.patchId : undefined,
           body.patch && typeof body.patch === "object" ? (body.patch as TemplatePatchProposal) : undefined,
         );
+        return;
+      case "applyAllPatches":
+        await this.applyAllTemplatePatches();
         return;
       case "clearHelperActivity": {
         const key = this.currentConversationKey();
@@ -1177,8 +1180,27 @@ export class TrackerApp {
         quote: cleanQuote || attributed.matchedSnippet,
       };
 
+      if (options?.content && message.content.includes(options.content)) {
+        const offset = message.content.indexOf(options.content);
+        reportedSpan.charStart = offset;
+        reportedSpan.charEnd = offset + options.content.length;
+      }
+
       capture.reported = (capture.reported ?? [])
-        .filter((span) => !(span.messageIndex === messageIndex && span.source === "attributed"))
+        .filter((span) => {
+          if (span.messageIndex !== messageIndex || span.source !== "attributed") {
+            return true;
+          }
+          if (
+            reportedSpan.charStart !== undefined &&
+            reportedSpan.charEnd !== undefined &&
+            span.charStart !== undefined &&
+            span.charEnd !== undefined
+          ) {
+            return span.charEnd <= reportedSpan.charStart || span.charStart >= reportedSpan.charEnd;
+          }
+          return !options?.content;
+        })
         .concat(reportedSpan);
 
       const cachedAttr: CachedAttribution = {
@@ -1857,6 +1879,56 @@ export class TrackerApp {
     this.statusTimer = setTimeout(() => this.refreshStatus(), 4000);
   }
 
+  private collectPendingTemplatePatches(conversationKey?: string): TemplatePatchProposal[] {
+    const key = conversationKey || this.currentConversationKey();
+    const conv = this.getConversation(key);
+    const pending: TemplatePatchProposal[] = [];
+    const seen = new Set<string>();
+    for (const act of conv.activity) {
+      const patch = act.patch;
+      if (!patch || act.patchApplied || this.appliedPatches.has(patch.patchId) || seen.has(patch.patchId)) {
+        continue;
+      }
+      seen.add(patch.patchId);
+      pending.push(patch);
+    }
+    pending.sort((a, b) => {
+      const byFile = a.file.localeCompare(b.file);
+      if (byFile !== 0) {
+        return byFile;
+      }
+      return b.startLine - a.startLine;
+    });
+    return pending;
+  }
+
+  public async applyAllTemplatePatches(conversationKey?: string): Promise<void> {
+    const pending = this.collectPendingTemplatePatches(conversationKey);
+    if (pending.length === 0) {
+      vscode.window.showInformationMessage("No pending template patches to apply.");
+      return;
+    }
+    let applied = 0;
+    let failed = 0;
+    for (const patch of pending) {
+      const ok = await this.applyTemplatePatch(undefined, patch);
+      if (ok) {
+        applied += 1;
+      } else {
+        failed += 1;
+      }
+    }
+    if (applied > 0 && failed === 0) {
+      vscode.window.showInformationMessage(
+        applied === 1 ? "Applied 1 template patch." : `Applied ${applied} template patches.`,
+      );
+    } else if (applied > 0) {
+      vscode.window.showWarningMessage(`Applied ${applied} patch(es); ${failed} could not be applied.`);
+    } else {
+      vscode.window.showErrorMessage("Could not apply the pending template patches.");
+    }
+  }
+
   public async applyTemplatePatch(patchId?: string, patchCandidate?: TemplatePatchProposal): Promise<boolean> {
     const patch = patchCandidate || (patchId ? this.knownPatches.get(patchId) : null) || this.activePatch;
     if (!patch || !this.project) {
@@ -2049,7 +2121,7 @@ export class TrackerApp {
       };
 
       const conv = await this.loadConversation(targetKey);
-      const threadHistory = conv.messages || [];
+      const threadHistory = sanitizeMessagesForHelperApi(conv.messages || []);
 
       let chatTools: Array<any>;
       let systemPrompt: string;
@@ -2170,7 +2242,7 @@ export class TrackerApp {
 
       if (result.messages && result.messages.length > 0) {
         const nonSystem = result.messages.filter((m) => m.role !== "system");
-        conv.messages = nonSystem.slice(-16);
+        conv.messages = sanitizeMessagesForHelperApi(nonSystem).slice(-16);
       }
 
       if (result.finish) {

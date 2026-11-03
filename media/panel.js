@@ -2,6 +2,7 @@ let asideScrollTop = 0;
 let cardsScrollTop = 0;
 let feedScrollTop = 0;
 let detailScrollTop = 0;
+let scrollAnchorAfterRender = null;
 
 (function () {
   const vscode = acquireVsCodeApi();
@@ -91,7 +92,7 @@ let detailScrollTop = 0;
       const text = sel.toString().trim();
       if (state && text.length >= 8 && text !== activeSelection) {
         activeSelection = text;
-        render();
+        syncSelectionBar();
       }
     }, 50);
   });
@@ -110,6 +111,19 @@ let detailScrollTop = 0;
   vscode.postMessage({ type: "ready" });
   render();
 
+  function getContextViewScrollEl() {
+    const detailBody = document.querySelector("#detail .detail-body");
+    if (detailBody) {
+      return detailBody;
+    }
+    return document.scrollingElement;
+  }
+
+  function renderKeepingSection(anchorId) {
+    scrollAnchorAfterRender = anchorId;
+    render();
+  }
+
   function render() {
     const scroller = document.scrollingElement;
     if (scroller) {
@@ -118,7 +132,7 @@ let detailScrollTop = 0;
     const existingAside = document.querySelector(".layout-editor > aside");
     const existingCards = document.getElementById("sidebar-cards");
     const existingFeed = document.getElementById("helper-feed");
-    const existingDetail = document.getElementById("detail");
+    const existingContextScroll = getContextViewScrollEl();
     if (existingAside) {
       asideScrollTop = existingAside.scrollTop;
     }
@@ -128,8 +142,8 @@ let detailScrollTop = 0;
     if (existingFeed) {
       feedScrollTop = existingFeed.scrollTop;
     }
-    if (existingDetail) {
-      detailScrollTop = existingDetail.scrollTop;
+    if (existingContextScroll) {
+      detailScrollTop = existingContextScroll.scrollTop;
     }
     const sameCapture = state && state.selectedId === seenCapture;
     const activeIsHelperInput = document.activeElement && document.activeElement.classList.contains("helper-input");
@@ -161,15 +175,25 @@ let detailScrollTop = 0;
           newFeed.scrollTop = feedScrollTop;
         }
       }
-      const newDetail = document.getElementById("detail");
+      const newDetail = getContextViewScrollEl();
       if (newDetail && sameCapture) {
         newDetail.scrollTop = detailScrollTop;
       }
+      if (scrollAnchorAfterRender && sameCapture) {
+        const anchor = document.getElementById(scrollAnchorAfterRender);
+        if (anchor) {
+          anchor.scrollIntoView({ block: "nearest" });
+        }
+      }
+      scrollAnchorAfterRender = null;
       if (activeIsHelperInput) {
         const input = document.querySelector(".helper-input");
         if (input) {
           input.focus();
         }
+      }
+      if (activeSelection) {
+        syncSelectionBar();
       }
     } catch (error) {
       app.replaceChildren();
@@ -324,11 +348,11 @@ let detailScrollTop = 0;
       ? h("div", { class: "sidebar-chat-companion" },
           h("div", { class: "card helper-companion-card" },
             h("div", { class: "spread" },
-              h("strong", { style: "font-size:12px;display:flex;align-items:center;gap:6px;" },
+              h("strong", { style: "font-size:13px;display:flex;align-items:center;gap:6px;" },
                 h("span", null, "🤖"),
                 "Meta AI Co-Pilot"),
-              h("span", { class: "badge badge-ready", style: "font-size:10px;" }, "Active in Main View")),
-            h("p", { class: "quiet", style: "font-size:11px;margin:4px 0;" }, "Chat is expanded to the large main editor pane for maximum readability."),
+              h("span", { class: "badge badge-ready", style: "font-size:11px;" }, "Active in Main View")),
+            h("p", { class: "quiet", style: "font-size:12px;margin:4px 0;" }, "Chat is expanded to the large main editor pane for maximum readability."),
             h("div", { class: "row", style: "gap:6px;margin-top:6px;" },
               h("button", {
                 class: "secondary icon-btn",
@@ -442,13 +466,13 @@ let detailScrollTop = 0;
           h("h2", { style: "margin:0;display:inline-flex;align-items:center;gap:6px;" },
             project.name,
             state.recorder && state.recorder.mobile && state.recorder.mobile.isAndroid
-              ? h("span", { class: "badge badge-mobile-idle", style: "font-size:10px;font-weight:normal;" }, "Android")
+              ? h("span", { class: "badge badge-mobile-idle", style: "font-size:11px;font-weight:normal;" }, "Android")
               : null)),
         h("div", { class: "row", style: "gap:4px;" },
           project.indexing ? null : h("button", { class: "ghost icon-btn", onClick: send("reindex"), title: "Index files again" }, "Reindex"),
           h("button", { class: "ghost icon-btn", onClick: send("openProject") }, "Change"))),
-      isCollapsed ? null : h("p", { class: "quiet", id: "file-count", style: "font-size:11px;" }, count),
-      isCollapsed ? null : h("button", { class: "secondary", style: "font-size:11px;padding:3px 8px;margin-top:2px;", onClick: send("openHelper") }, helperButtonLabel(state.helper)),
+      isCollapsed ? null : h("p", { class: "quiet", id: "file-count", style: "font-size:12px;" }, count),
+      isCollapsed ? null : h("button", { class: "secondary", style: "font-size:12px;padding:3px 8px;margin-top:2px;", onClick: send("openHelper") }, helperButtonLabel(state.helper)),
       !isCollapsed && state.helper && helperVisible(state.helper) ? helperCard(state.helper) : null);
   }
 
@@ -497,21 +521,21 @@ let detailScrollTop = 0;
             : null,
           h("span", { class: recorder.running ? "badge badge-ready" : "badge badge-idle" },
             recorder.running ? "● Active (47321)" : "○ Off"))),
-      isCollapsed ? null : trafficSummary ? h("p", { class: "quiet", style: "font-weight:600;font-size:11px;margin:2px 0;" }, trafficSummary) : null,
+      isCollapsed ? null : trafficSummary ? h("p", { class: "quiet", style: "font-weight:600;font-size:12px;margin:2px 0;" }, trafficSummary) : null,
       isCollapsed ? null : (recorder.running && recorder.mobile && recorder.mobile.isStale)
         ? h("div", { class: "banner warning mobile-stale-card", style: "margin:6px 0;display:flex;align-items:center;gap:6px;" },
-            h("span", { style: "font-size:13px;" }, "⚡"),
+            h("span", { style: "font-size:14px;" }, "⚡"),
             h("div", null,
-              h("strong", { style: "font-size:11px;display:block;" }, "Re-run app in Android Studio"),
-              h("span", { class: "quiet", style: "font-size:10px;" }, "APK is older than the redirected endpoint. Trigger 'Run' in Android Studio to apply capture.")))
+              h("strong", { style: "font-size:12px;display:block;" }, "Re-run app in Android Studio"),
+              h("span", { class: "quiet", style: "font-size:11px;" }, "APK is older than the redirected endpoint. Trigger 'Run' in Android Studio to apply capture.")))
         : null,
       isCollapsed ? null : (recorder.mobile && recorder.mobile.isAndroid && !recorder.mobile.cleartextPermitted)
         ? h("div", { class: "banner warning mobile-security-card", style: "margin:6px 0;display:flex;flex-direction:column;gap:6px;" },
             h("div", { class: "spread", style: "align-items:flex-start;" },
-              h("span", { style: "font-weight:600;font-size:11px;" }, "⚠️ Cleartext HTTP Blocked"),
+              h("span", { style: "font-weight:600;font-size:12px;" }, "⚠️ Cleartext HTTP Blocked"),
               h("button", {
                 class: "secondary icon-btn",
-                style: "font-size:10px;padding:2px 6px;",
+                style: "font-size:11px;padding:2px 6px;",
                 onClick: () => {
                   copyToClipboard(recorder.mobile.remediationSnippet || "");
                   copiedSecuritySnippet = true;
@@ -520,7 +544,7 @@ let detailScrollTop = 0;
                 },
                 title: "Copy network_security_config.xml XML configuration to clipboard",
               }, copiedSecuritySnippet ? "✓ Copied XML" : "Copy network_security_config.xml")),
-            h("p", { class: "quiet", style: "font-size:10px;margin:0;line-height:1.4;" },
+            h("p", { class: "quiet", style: "font-size:11px;margin:0;line-height:1.4;" },
               "Android 9+ blocks unencrypted http:// by default. Requests to port 47321 will fail unless permitted in network_security_config.xml."))
         : null,
       isCollapsed ? null : recorder.missedHint
@@ -528,7 +552,7 @@ let detailScrollTop = 0;
         : null,
       isCollapsed ? null : recorder.found
         ? h("div", { class: "spread" },
-            h("p", { class: "quiet", style: "word-break:break-word;font-size:11px;" }, recorder.found),
+            h("p", { class: "quiet", style: "word-break:break-word;font-size:12px;" }, recorder.found),
             recorder.running
               ? null
               : h("button", { class: "ghost icon-btn", onClick: send("forgetAddress"), title: "Disconnect this address and let the AI helper search again" }, "Disconnect"))
@@ -620,7 +644,7 @@ let detailScrollTop = 0;
           ? h("button", { class: "ghost icon-btn", onClick: requestClear }, confirmClear ? "Confirm clear" : "Clear")
           : null),
       isCollapsed ? null : state.captures.length === 0
-        ? h("p", { class: "quiet", style: "font-size:11px;" }, "No calls yet. Send a prompt from your app.")
+        ? h("p", { class: "quiet", style: "font-size:12px;" }, "No calls yet. Send a prompt from your app.")
         : h("div", { class: "capture-list" }, ...state.captures.map(captureButton)));
   }
 
@@ -731,6 +755,51 @@ let detailScrollTop = 0;
       helperConsole({ inAside: false, inMain: true }));
   }
 
+  function buildSelectionFloatingBar() {
+    if (!activeSelection) {
+      return null;
+    }
+    return h("div", { class: "selection-floating-bar spread" },
+      h("div", { class: "row", style: "gap:6px;align-items:center;" },
+        h("span", { style: "font-size:14px;" }, "✂️"),
+        h("span", { class: "selection-bar-text" }, "Highlighted text: \"" + activeSelection.slice(0, 50) + (activeSelection.length > 50 ? "…" : "") + "\" (" + activeSelection.length + " chars)")),
+      h("div", { class: "row", style: "gap:6px;" },
+        h("button", {
+          class: "primary selection-ask-btn",
+          onClick: () => {
+            setTargetScope({
+              kind: "selection",
+              selectedText: activeSelection,
+              charCount: activeSelection.length,
+              label: "Selection (" + activeSelection.length + " chars)",
+            });
+          },
+          title: "Scope Meta AI questions to this selected text",
+        }, "💬 Ask Meta AI"),
+        h("button", {
+          class: "ghost icon-btn",
+          onClick: () => {
+            activeSelection = "";
+            const sel = window.getSelection();
+            if (sel) {
+              sel.removeAllRanges();
+            }
+            syncSelectionBar();
+          },
+          title: "Clear selection",
+        }, "✕")));
+  }
+
+  function syncSelectionBar() {
+    document.querySelectorAll(".selection-bar-host").forEach((host) => {
+      host.replaceChildren();
+      const bar = buildSelectionFloatingBar();
+      if (bar) {
+        host.append(bar);
+      }
+    });
+  }
+
   function promptColumn(capture, which) {
     const spans = flatten(capture);
     const surface = document.body.dataset.surface;
@@ -747,37 +816,8 @@ let detailScrollTop = 0;
               }, "🤖 AI Helper Chat")
             : null,
           h("button", { class: "ghost icon-btn", onClick: () => post({ type: "deleteCapture", id: capture.id }) }, "Delete call"))),
-      activeSelection
-        ? h("div", { class: "selection-floating-bar spread" },
-            h("div", { class: "row", style: "gap:6px;align-items:center;" },
-              h("span", { style: "font-size:13px;" }, "✂️"),
-              h("span", { class: "selection-bar-text" }, "Highlighted text: \"" + activeSelection.slice(0, 50) + (activeSelection.length > 50 ? "…" : "") + "\" (" + activeSelection.length + " chars)")),
-            h("div", { class: "row", style: "gap:6px;" },
-              h("button", {
-                class: "primary selection-ask-btn",
-                onClick: () => {
-                  post({
-                    type: "setScope",
-                    scope: {
-                      kind: "selection",
-                      selectedText: activeSelection,
-                      charCount: activeSelection.length,
-                      label: "Selection (" + activeSelection.length + " chars)",
-                    },
-                  });
-                  focusHelperConsole();
-                },
-                title: "Scope Meta AI questions to this selected text",
-              }, "💬 Ask Meta AI"),
-              h("button", {
-                class: "ghost icon-btn",
-                onClick: () => {
-                  activeSelection = "";
-                  render();
-                },
-                title: "Clear selection",
-              }, "✕")))
-        : null,
+      h("div", { class: "selection-bar-host" }),
+      renderPromptScopeBanner(),
       h("p", { class: "meta" }, [
         formatTime(capture.createdAt),
         capture.provider,
@@ -799,7 +839,96 @@ let detailScrollTop = 0;
       which ? null : exactHelp());
   }
 
-  function focusHelperConsole() {
+  function hasActiveTextSelection() {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed) {
+      return false;
+    }
+    return sel.toString().trim().length > 0;
+  }
+
+  function isSameSectionScope(current, next) {
+    if (!current || !next || current.kind !== "section" || next.kind !== "section") {
+      return false;
+    }
+    if (current.sectionId && next.sectionId) {
+      return current.sectionId === next.sectionId;
+    }
+    return current.messageIndex === next.messageIndex &&
+      current.category === next.category &&
+      current.label === next.label;
+  }
+
+  function isSameTargetScope(current, next) {
+    if (!current || !next || current.kind !== next.kind) {
+      return false;
+    }
+    if (current.kind === "section") {
+      return isSameSectionScope(current, next);
+    }
+    if (current.kind === "selection") {
+      return current.selectedText === next.selectedText;
+    }
+    return false;
+  }
+
+  function sectionScopeMatches(activeScope, sectionId, aliases) {
+    if (!activeScope || activeScope.kind !== "section" || !activeScope.sectionId) {
+      return false;
+    }
+    if (activeScope.sectionId === sectionId) {
+      return true;
+    }
+    if (aliases) {
+      for (let i = 0; i < aliases.length; i++) {
+        if (activeScope.sectionId === aliases[i]) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  function clearTargetScope() {
+    if (!state.helper) {
+      state.helper = {};
+    }
+    state.helper.activeScope = { kind: "global", label: "All Context" };
+    render();
+    post({ type: "clearScope" });
+    const input = document.querySelector(".helper-input");
+    if (input) {
+      input.placeholder = "Ask Meta AI about this context window…";
+    }
+  }
+
+  function setTargetScope(scope) {
+    if (!scope) return;
+    if (hasActiveTextSelection()) {
+      return;
+    }
+    const current = state.helper && state.helper.activeScope;
+    if (current && isSameTargetScope(current, scope)) {
+      clearTargetScope();
+      return;
+    }
+    if (!state.helper) state.helper = {};
+    state.helper.activeScope = scope;
+    render();
+    post({ type: "setScope", scope: scope });
+    focusHelperConsole(scope.label);
+  }
+
+  function scopeHeaderClick(scope) {
+    return (e) => {
+      if (e && e.target && e.target.closest && e.target.closest(".scope-clear-btn, .scope-unscope-btn")) {
+        return;
+      }
+      setTargetScope(scope);
+    };
+  }
+
+  function focusHelperConsole(scopeLabel) {
     const surface = document.body.dataset.surface;
     if (surface === "sidebar") {
       activeSidebarTab = "helper";
@@ -811,14 +940,19 @@ let detailScrollTop = 0;
     }
     render();
     setTimeout(() => {
-      const el = document.getElementById("helper-console");
-      if (el) {
-        el.scrollIntoView({ behavior: "smooth", block: "start" });
+      // ONLY scroll into view if NOT in side-by-side editor layout (prevent prompt view jumps)
+      if (surface !== "editor") {
+        const el = document.getElementById("helper-console");
+        if (el) {
+          el.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
       }
       const input = document.querySelector(".helper-input");
       if (input) {
+        if (scopeLabel) {
+          input.placeholder = "Ask Meta AI about " + scopeLabel + "…";
+        }
         input.focus();
-        input.scrollIntoView({ behavior: "smooth", block: "nearest" });
       }
     }, 40);
   }
@@ -845,6 +979,7 @@ let detailScrollTop = 0;
     const inMain = Boolean(options && options.inMain);
     const activity = (helper && helper.activity) || [];
     const busy = Boolean(helper && helper.busy);
+    const pendingPatchCount = countPendingPatches(activity);
     const modelName = helper && helper.model ? (helperChoiceLabel(helper.model) || helper.model) : "Meta Muse";
     const surface = document.body.dataset.surface;
     const isEditor = surface === "editor";
@@ -857,14 +992,22 @@ let detailScrollTop = 0;
 
     const header = h("div", { class: "helper-console-header spread" },
       h("div", { class: "row", style: "gap:6px;align-items:center;" },
-        h("span", { style: "font-size:14px;" }, "🤖"),
-        h("h3", { style: "margin:0;font-size:12px;font-weight:600;" }, inMain ? "Meta AI Prompt Co-Pilot & Interrogation" : "Meta AI Helper"),
+        h("span", { style: "font-size:15px;" }, "🤖"),
+        h("h3", { style: "margin:0;font-size:13px;font-weight:600;" }, inMain ? "Meta AI Prompt Co-Pilot & Interrogation" : "Meta AI Helper"),
         h("span", { class: "helper-model-pill" }, modelName),
         state.selected
           ? h("span", { class: "helper-context-pill", title: "Chat conversation scoped to this context window" }, "🎯 " + (state.selected.model || ("Call " + formatTime(state.selected.createdAt))))
           : h("span", { class: "helper-context-pill", title: "Project-level conversation" }, "📁 Project"),
         statusBadge),
       h("div", { class: "row", style: "gap:4px;align-items:center;" },
+        pendingPatchCount >= 2
+          ? h("button", {
+              class: "primary patch-apply-all-btn",
+              disabled: busy,
+              onClick: () => post({ type: "applyAllPatches" }),
+              title: "Apply every pending patch proposal from this conversation",
+            }, "✅ Apply All Patches (" + pendingPatchCount + ")")
+          : null,
         activity.length > 0
           ? h("button", { class: "ghost icon-btn", onClick: () => post({ type: "clearHelperActivity" }), title: state.selected ? "Clear chat for this context window" : "Clear project chat activity" }, "Clear")
           : null,
@@ -942,14 +1085,14 @@ let detailScrollTop = 0;
       h("div", { class: "row", style: "gap:6px;align-items:center;overflow:hidden;flex:1;" },
         h("span", { class: "scope-label-prefix" }, "Scope:"),
         h("span", { class: "scope-pill " + (isGlobal ? "scope-pill-global" : "scope-pill-targeted") },
-          h("span", { style: "font-size:12px;" }, icon),
+          h("span", { style: "font-size:13px;" }, icon),
           h("span", { class: "scope-pill-text", title: scopeText }, scopeText),
           !isGlobal
             ? h("button", {
                 class: "scope-clear-btn",
                 onClick: (e) => {
                   e.stopPropagation();
-                  post({ type: "clearScope" });
+                  clearTargetScope();
                 },
                 title: "Clear scope and return to All Context",
               }, "✕")
@@ -958,10 +1101,31 @@ let detailScrollTop = 0;
         !isGlobal
           ? h("button", {
               class: "ghost scope-reset-link",
-              onClick: () => post({ type: "clearScope" }),
+              onClick: () => clearTargetScope(),
               title: "Reset scope to All Context",
             }, "All Context")
           : null));
+  }
+
+  function renderPromptScopeBanner() {
+    const activeScope = state.helper && state.helper.activeScope;
+    if (!activeScope || activeScope.kind === "global") {
+      return null;
+    }
+    let label = activeScope.label || "Scoped section";
+    if (activeScope.kind === "selection") {
+      label = "Text selection (" + (activeScope.charCount || 0) + " chars)";
+    }
+    return h("div", { class: "prompt-scope-banner spread" },
+      h("div", { class: "row", style: "gap:6px;align-items:center;overflow:hidden;flex:1;" },
+        h("span", { style: "font-size:14px;" }, "🎯"),
+        h("span", { class: "quiet", style: "font-size:12.5px;" }, "Meta AI scoped to:"),
+        h("span", { class: "prompt-scope-banner-label", title: label }, label)),
+      h("button", {
+        class: "ghost scope-unscope-btn",
+        onClick: () => clearTargetScope(),
+        title: "Clear scope and return to All Context (or click the same section again)",
+      }, "Clear scope"));
   }
 
   function helperEmptyState() {
@@ -983,10 +1147,31 @@ let detailScrollTop = 0;
       h("p", { class: "note", style: "margin-top:4px;" }, "Type below or click a quick action to start."));
   }
 
+  function countPendingPatches(activity) {
+    if (!Array.isArray(activity)) {
+      return 0;
+    }
+    let count = 0;
+    const seen = {};
+    for (let i = 0; i < activity.length; i += 1) {
+      const item = activity[i];
+      if (!item || !item.patch || item.patchApplied) {
+        continue;
+      }
+      const id = item.patch.patchId;
+      if (!id || seen[id]) {
+        continue;
+      }
+      seen[id] = true;
+      count += 1;
+    }
+    return count;
+  }
+
   function renderPatchCard(item) {
     const time = formatTime(item.timestamp);
     const diff = item.detail || "";
-    const patch = item.patch || (state.helper && state.helper.activePatch);
+    const patch = item.patch;
     const patchId = patch ? patch.patchId : undefined;
     const impact = patch && patch.tokenImpactEstimate ? patch.tokenImpactEstimate : "optimized";
     const isApplied = Boolean(item.patchApplied || (patch && patch.status === "applied"));
@@ -1020,8 +1205,8 @@ let detailScrollTop = 0;
       h("div", { class: "patch-actions spread", style: "align-items:center;" },
         isApplied
           ? h("div", { class: "row", style: "gap:6px;align-items:center;" },
-              h("span", { style: "color:#4ade80;font-size:12px;font-weight:600;" }, "✓ Applied to workspace"),
-              h("span", { class: "quiet", style: "font-size:11px;" }, patch ? (patch.file + ":" + patch.startLine) : ""))
+              h("span", { style: "color:#4ade80;font-size:13px;font-weight:600;" }, "✓ Applied to workspace"),
+              h("span", { class: "quiet", style: "font-size:12px;" }, patch ? (patch.file + ":" + patch.startLine) : ""))
           : h("button", {
               class: "primary patch-apply-btn",
               disabled: Boolean(state.helper && state.helper.busy),
@@ -1035,6 +1220,123 @@ let detailScrollTop = 0;
         }, "✕ Dismiss")));
   }
 
+  function escapeHtml(text) {
+    return String(text)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function sanitizeMarkdownHref(raw) {
+    const href = String(raw).trim();
+    if (/^(https?:|mailto:)/i.test(href)) {
+      return escapeHtml(href);
+    }
+    if (href.startsWith("#")) {
+      return escapeHtml(href);
+    }
+    return "#";
+  }
+
+  function renderInlineMarkdown(escaped) {
+    return escaped
+      .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/\*([^*]+)\*/g, "<em>$1</em>")
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, url) =>
+        `<a href="${sanitizeMarkdownHref(url)}">${label}</a>`);
+  }
+
+  function renderMarkdown(source) {
+    if (source == null || source === "") {
+      return "";
+    }
+    const fences = [];
+    let src = String(source).replace(/\r\n/g, "\n");
+    src = src.replace(/```([^\n]*)\n([\s\S]*?)```/g, (_, _info, body) => {
+      const id = fences.length;
+      fences.push(escapeHtml(body.replace(/\n$/, "")));
+      return `\n\x00FENCE${id}\x00\n`;
+    });
+
+    const lines = src.split("\n");
+    const out = [];
+    let inUl = false;
+    let inOl = false;
+
+    function closeLists() {
+      if (inUl) {
+        out.push("</ul>");
+        inUl = false;
+      }
+      if (inOl) {
+        out.push("</ol>");
+        inOl = false;
+      }
+    }
+
+    for (const line of lines) {
+      const fenceMatch = line.match(/^\x00FENCE(\d+)\x00$/);
+      if (fenceMatch) {
+        closeLists();
+        out.push(`<pre><code>${fences[Number(fenceMatch[1])]}</code></pre>`);
+        continue;
+      }
+      const trimmed = line.trim();
+      if (trimmed === "") {
+        closeLists();
+        continue;
+      }
+      const h3 = trimmed.match(/^###\s+(.+)$/);
+      const h2 = trimmed.match(/^##\s+(.+)$/);
+      const h1 = trimmed.match(/^#\s+(.+)$/);
+      if (h1 || h2 || h3) {
+        closeLists();
+        const level = h1 ? 1 : h2 ? 2 : 3;
+        const heading = (h1 || h2 || h3)[1];
+        out.push(`<h${level}>${renderInlineMarkdown(escapeHtml(heading))}</h${level}>`);
+        continue;
+      }
+      const ul = trimmed.match(/^[-*+]\s+(.+)$/);
+      if (ul) {
+        if (inOl) {
+          out.push("</ol>");
+          inOl = false;
+        }
+        if (!inUl) {
+          out.push("<ul>");
+          inUl = true;
+        }
+        out.push(`<li>${renderInlineMarkdown(escapeHtml(ul[1]))}</li>`);
+        continue;
+      }
+      const ol = trimmed.match(/^\d+\.\s+(.+)$/);
+      if (ol) {
+        if (inUl) {
+          out.push("</ul>");
+          inUl = false;
+        }
+        if (!inOl) {
+          out.push("<ol>");
+          inOl = true;
+        }
+        out.push(`<li>${renderInlineMarkdown(escapeHtml(ol[1]))}</li>`);
+        continue;
+      }
+      closeLists();
+      out.push(`<p>${renderInlineMarkdown(escapeHtml(line))}</p>`);
+    }
+    closeLists();
+    return out.join("");
+  }
+
+  function hMarkdown(tag, className, markdownSource) {
+    const node = h(tag, { class: className });
+    node.innerHTML = renderMarkdown(markdownSource);
+    return node;
+  }
+
   function renderActivityItem(item) {
     const time = formatTime(item.timestamp);
     if (item.kind === "assistant") {
@@ -1042,7 +1344,7 @@ let detailScrollTop = 0;
         h("div", { class: "helper-item-header" },
           h("span", { class: "helper-badge assistant-badge" }, "🤖 Meta AI"),
           h("span", { class: "helper-time" }, time)),
-        h("div", { class: "helper-assistant-body" }, item.text));
+        hMarkdown("div", "helper-assistant-body helper-markdown", item.text));
     }
     if (item.kind === "thought") {
       return h("div", { class: "helper-item helper-thought" },
@@ -1069,15 +1371,15 @@ let detailScrollTop = 0;
         h("pre", { class: "helper-pre" }, item.text));
     }
     if (item.kind === "finish") {
-      if (item.detail && item.detail.includes("--- a/")) {
+      if (item.patch || (item.detail && item.detail.includes("--- a/"))) {
         return renderPatchCard(item);
       }
       return h("div", { class: "helper-item helper-finish" },
         h("div", { class: "helper-item-header" },
           h("span", { class: "helper-badge finish-badge" }, "🎯 Outcome"),
           h("span", { class: "helper-time" }, time)),
-        h("p", { class: "helper-finish-text" }, item.text),
-        item.detail ? h("p", { class: "quiet", style: "margin-top:4px;" }, item.detail) : null);
+        hMarkdown("div", "helper-finish-text helper-markdown", item.text),
+        item.detail ? hMarkdown("div", "quiet helper-markdown", item.detail) : null);
     }
     if (item.kind === "user") {
       return h("div", { class: "helper-item helper-user" },
@@ -1196,7 +1498,7 @@ let detailScrollTop = 0;
         ? h("div", { class: "row", style: "gap:4px;overflow:hidden;align-items:center;" },
             hasSelectedCapture ? h("span", { class: "quick-actions-mini-tag" }, "🔍 Contradictions") : null,
             hasSelectedCapture ? h("span", { class: "quick-actions-mini-tag" }, "✂️ Optimize") : null,
-            h("span", { class: "quick-actions-mini-tag quiet", style: "font-size:9.5px;" }, "click to expand"))
+            h("span", { class: "quick-actions-mini-tag quiet", style: "font-size:10.5px;" }, "click to expand"))
         : null);
 
     return h("div", { class: "helper-chips-container" },
@@ -1288,24 +1590,28 @@ let detailScrollTop = 0;
       ? "Tool Definitions (" + toolsCount + " tool" + (toolsCount > 1 ? "s" : "") + ")"
       : message.roleLabel;
 
-    return h("section", { class: "message" + (isTools ? " message-tools" : ""), id: "message-" + capture.id + "-" + messageIndex },
+    const activeScope = state.helper && state.helper.activeScope;
+    const isMessageScoped = sectionScopeMatches(activeScope, "msg-" + messageIndex, []);
+
+    const messageScope = {
+      kind: "section",
+      sectionId: telemetries[0]?.sectionId || ("msg-" + messageIndex),
+      messageIndex: messageIndex,
+      label: roleTitle + " (#" + (messageIndex + 1) + ")",
+    };
+
+    return h("section", {
+      class: "message" + (isTools ? " message-tools" : "") + (isMessageScoped ? " is-scoped" : ""),
+      id: "message-" + capture.id + "-" + messageIndex,
+    },
       h("div", { class: "spread" },
-        h("h2", null, roleTitle),
+        h("div", { class: "row", style: "gap:6px;align-items:center;" },
+          h("h2", null, roleTitle),
+          isMessageScoped ? h("span", { class: "scope-target-badge" }, "🎯 Active Scope") : null),
         h("div", { class: "row", style: "gap:4px;align-items:center;" },
           h("button", {
             class: "ghost ask-ai-btn",
-            onClick: () => {
-              post({
-                type: "setScope",
-                scope: {
-                  kind: "section",
-                  sectionId: telemetries[0]?.sectionId || ("msg-" + messageIndex),
-                  messageIndex: messageIndex,
-                  label: roleTitle + " (#" + (messageIndex + 1) + ")",
-                },
-              });
-              focusHelperConsole();
-            },
+            onClick: () => setTargetScope(messageScope),
             title: "Scope Meta AI questions to this " + roleTitle,
           }, "💬 Ask AI"),
           canAttribute && telemetries.length === 0
@@ -1323,7 +1629,11 @@ let detailScrollTop = 0;
                 ...telemetries.map((t) => renderAnatomyCard(capture, message, messageIndex, t)))
             : null),
       message.truncated ? h("p", { class: "quiet" }, "This part was shortened for display. The model still received the full text.") : null,
-      !isTools ? message.spans.map((span) => renderSpan(capture, span)) : null);
+      !isTools
+        ? message.spans.map((span, sIdx) =>
+            renderSpan(capture, span, sIdx, messageIndex, sIdx > 0 ? message.spans[sIdx - 1] : null)
+          )
+        : null);
   }
 
   function renderToolsBreakdown(capture, message, messageIndex, telemetries) {
@@ -1335,11 +1645,13 @@ let detailScrollTop = 0;
     const cautionCount = telemetries.filter((t) => t.secondOpinion && (t.secondOpinion.verdict === "caution" || t.secondOpinion.verdict === "security_risk" || t.secondOpinion.verdict === "redundant")).length;
     const totalTokens = telemetries.reduce((sum, t) => sum + t.tokenEstimate, 0);
 
+    const activeScope = state.helper && state.helper.activeScope;
+
     return h("div", { class: "tools-overview-container", id: "section-" + capture.id + "-tools" },
       h("div", { class: "tools-summary-bar" },
         h("div", { class: "row", style: "gap:6px;align-items:center;flex-wrap:wrap;" },
           h("span", { class: "tools-summary-title" }, "🛠️ Tool Architecture & Meta AI Hygiene Review"),
-          h("span", { class: "quiet", style: "font-size:11px;" }, totalTokens.toLocaleString("en-US") + " tokens total")),
+          h("span", { class: "quiet", style: "font-size:12px;" }, totalTokens.toLocaleString("en-US") + " tokens total")),
         h("div", { class: "row", style: "gap:6px;align-items:center;flex-wrap:wrap;" },
           recCount > 0 ? h("span", { class: "badge-verdict verdict-recommended" }, "✅ " + recCount + " Active") : null,
           bloatCount > 0 ? h("span", { class: "badge-verdict verdict-unnecessary" }, "⚠️ " + bloatCount + " Unneeded Bloat") : null,
@@ -1351,42 +1663,53 @@ let detailScrollTop = 0;
           const opinion = t.secondOpinion;
           const verdictClass = opinion ? ("verdict-" + opinion.verdict) : "";
 
-          return h("div", { class: "tool-card", id: "section-" + capture.id + "-" + t.sectionId },
-            h("div", { class: "tool-card-header" },
+          const isToolScoped = sectionScopeMatches(activeScope, t.sectionId, []);
+
+          const toolScope = {
+            kind: "section",
+            sectionId: t.sectionId,
+            messageIndex: messageIndex,
+            category: t.category,
+            categoryLabel: t.categoryLabel,
+            label: "Tool: " + (t.toolName || t.what),
+          };
+
+          return h("div", {
+            class: "tool-card" + (isToolScoped ? " is-scoped" : ""),
+            id: "section-" + capture.id + "-" + t.sectionId,
+          },
+            h("div", {
+              class: "tool-card-header",
+              style: "cursor:pointer;",
+              onClick: scopeHeaderClick(toolScope),
+              title: "Click to scope Meta AI to this tool · click again to clear",
+            },
               h("div", { class: "row", style: "gap:6px;align-items:center;flex-wrap:wrap;" },
                 h("code", { class: "tool-name-badge" }, "🔧 " + (t.toolName || "tool")),
                 h("span", { class: "anatomy-meta" },
                   t.tokenEstimate.toLocaleString("en-US") + " tokens · " + t.tokenPercentage + "% of context"),
-                opinion ? h("span", { class: "badge-verdict " + verdictClass }, opinion.verdictLabel) : null),
+                opinion ? h("span", { class: "badge-verdict " + verdictClass }, opinion.verdictLabel) : null,
+                isToolScoped ? h("span", { class: "scope-target-badge" }, "🎯 Active Scope") : null),
               h("div", { class: "row", style: "gap:4px;align-items:center;" },
                 h("button", {
                   class: "ghost ask-ai-btn",
-                  onClick: () => {
-                    post({
-                      type: "setScope",
-                      scope: {
-                        kind: "section",
-                        sectionId: t.sectionId,
-                        messageIndex: messageIndex,
-                        category: t.category,
-                        categoryLabel: t.categoryLabel,
-                        label: "Tool: " + (t.toolName || t.what),
-                      },
-                    });
-                    focusHelperConsole();
+                  onClick: (e) => {
+                    e.stopPropagation();
+                    setTargetScope(toolScope);
                   },
                   title: "Scope Meta AI questions to tool " + (t.toolName || t.what),
                 }, "💬 Ask AI"),
                 h("button", {
                   class: "ghost icon-btn",
-                  style: "font-size:11px;padding:2px 6px;",
-                  onClick: () => {
+                  style: "font-size:12px;padding:2px 6px;",
+                  onClick: (e) => {
+                    e.stopPropagation();
                     if (expandedToolSchemas.has(toolKey)) {
                       expandedToolSchemas.delete(toolKey);
                     } else {
                       expandedToolSchemas.add(toolKey);
                     }
-                    render();
+                    renderKeepingSection("section-" + capture.id + "-" + t.sectionId);
                   },
                   title: "Toggle JSON schema definition",
                 }, isSchemaExpanded ? "Hide Schema" : "Show Schema"))),
@@ -1407,21 +1730,25 @@ let detailScrollTop = 0;
               : null,
             isSchemaExpanded
               ? h("div", { class: "tool-schema-block" },
-                  h("div", { class: "quiet", style: "font-size:10.5px;margin-bottom:4px;" }, "JSON Schema Definition:"),
-                  h("pre", { style: "max-height:220px;overflow-y:auto;font-size:11px;margin:0;" }, t.content || ""))
+                  h("div", { class: "quiet", style: "font-size:11.5px;margin-bottom:4px;" }, "JSON Schema Definition:"),
+                  h("pre", { style: "max-height:220px;overflow-y:auto;font-size:12px;margin:0;" }, t.content || ""))
               : null);
         })),
       h("div", { style: "margin-top:8px;" },
         h("button", {
           class: "ghost",
-          style: "font-size:11px;padding:3px 8px;opacity:0.8;",
+          style: "font-size:12px;padding:3px 8px;opacity:0.8;",
           onClick: () => {
             showRawToolsJson.set(rawKey, !isRawOpen);
-            render();
+            renderKeepingSection("section-" + capture.id + "-tools");
           },
         }, isRawOpen ? "▼ Hide Full Raw Tools JSON" : "▶ Show Full Raw Tools JSON (" + message.spans.length + " payload block" + (message.spans.length > 1 ? "s" : "") + ")"),
         isRawOpen
-          ? h("div", { style: "margin-top:6px;" }, ...message.spans.map((span) => renderSpan(capture, span)))
+          ? h("div", { style: "margin-top:6px;" },
+              ...message.spans.map((span, sIdx) =>
+                renderSpan(capture, span, sIdx, messageIndex, sIdx > 0 ? message.spans[sIdx - 1] : null)
+              )
+            )
           : null));
   }
 
@@ -1436,29 +1763,51 @@ let detailScrollTop = 0;
     const opinion = telemetry.secondOpinion;
     const verdictClass = opinion ? ("verdict-" + opinion.verdict) : "";
 
-    return h("div", { class: "anatomy-card", id: "section-" + capture.id + "-" + telemetry.sectionId },
-      h("div", { class: "anatomy-card-header" },
+    const activeScope = state.helper && state.helper.activeScope;
+    const isScoped = sectionScopeMatches(activeScope, telemetry.sectionId, []);
+
+    const cardScope = {
+      kind: "section",
+      sectionId: telemetry.sectionId,
+      messageIndex: messageIndex,
+      category: telemetry.category,
+      categoryLabel: telemetry.categoryLabel,
+      label: telemetry.heading || telemetry.what || telemetry.categoryLabel,
+    };
+
+    return h("div", {
+      class: "anatomy-card" + (isScoped ? " is-scoped" : ""),
+      id: "section-" + capture.id + "-" + telemetry.sectionId,
+    },
+      h("div", {
+        class: "anatomy-card-header",
+        style: "cursor:pointer;",
+        onClick: scopeHeaderClick(cardScope),
+        title: "Click to scope Meta AI to this section · click again to clear",
+      },
         h("div", { class: "row", style: "gap:6px;align-items:center;flex-wrap:wrap;" },
           h("span", { class: "badge-category " + catClass }, labelTitle),
           h("span", { class: "anatomy-meta" },
             telemetry.tokenEstimate.toLocaleString("en-US") + " tokens · " + telemetry.tokenPercentage + "% of context"),
-          opinion ? h("span", { class: "badge-verdict " + verdictClass }, opinion.verdictLabel) : null),
+          opinion ? h("span", { class: "badge-verdict " + verdictClass }, opinion.verdictLabel) : null,
+          isScoped
+            ? h("span", { class: "scope-target-badge row", style: "gap:4px;align-items:center;" },
+                "🎯 Active Scope",
+                h("button", {
+                  class: "scope-unscope-btn",
+                  onClick: (e) => {
+                    e.stopPropagation();
+                    clearTargetScope();
+                  },
+                  title: "Remove this section from scope",
+                }, "✕"))
+            : null),
         h("div", { class: "row", style: "gap:4px;align-items:center;" },
           h("button", {
             class: "ghost ask-ai-btn",
-            onClick: () => {
-              post({
-                type: "setScope",
-                scope: {
-                  kind: "section",
-                  sectionId: telemetry.sectionId,
-                  messageIndex: messageIndex,
-                  category: telemetry.category,
-                  categoryLabel: telemetry.categoryLabel,
-                  label: telemetry.heading || telemetry.what || telemetry.categoryLabel,
-                },
-              });
-              focusHelperConsole();
+            onClick: (e) => {
+              e.stopPropagation();
+              setTargetScope(cardScope);
             },
             title: "Scope Meta AI questions to this " + (telemetry.heading || telemetry.categoryLabel) + " section",
           }, "💬 Ask AI"),
@@ -1466,7 +1815,10 @@ let detailScrollTop = 0;
             ? h("button", {
                 class: "ghost attribution-btn",
                 disabled: isAttributing || (state.helper && state.helper.busy),
-                onClick: () => attributeMessage(capture.id, messageIndex),
+                onClick: (e) => {
+                  e.stopPropagation();
+                  attributeMessage(capture.id, messageIndex);
+                },
                 title: "Attribute this " + telemetry.categoryLabel + " block to source template using Meta AI",
               }, isAttributing ? "Tracing…" : "✨ Trace in Code")
             : null)),
@@ -1495,16 +1847,16 @@ let detailScrollTop = 0;
       return h("div", { class: "telemetry-container telemetry-prompt-banner" },
         h("div", { class: "spread" },
           h("div", { class: "row", style: "gap:6px;align-items:center;" },
-            h("span", { style: "font-size:14px;" }, "📊"),
+            h("span", { style: "font-size:15px;" }, "📊"),
             h("strong", { class: "telemetry-title" }, "Context Window Anatomy & Telemetry")),
           h("button", {
             class: "secondary",
-            style: "font-size:11.5px;padding:3px 10px;",
+            style: "font-size:12.5px;padding:3px 10px;",
             disabled: isBusy,
             onClick: () => post({ type: "analyzeTelemetry", captureId: capture.id }),
             title: "Profile prompt architecture, RAG grounding, chat history share, and token budget with Meta AI",
           }, isBusy ? "Analyzing…" : "⚡ Analyze Anatomy with Meta AI")),
-        h("p", { class: "quiet", style: "font-size:11.5px;" },
+        h("p", { class: "quiet", style: "font-size:12.5px;" },
           "Discover prompt composition, RAG context shares, token budget allocation, and context bloat issues."));
     }
 
@@ -1515,13 +1867,13 @@ let detailScrollTop = 0;
     return h("div", { class: "telemetry-container", id: "telemetry-container" },
       h("div", { class: "telemetry-header" },
         h("div", { class: "row", style: "gap:6px;align-items:center;" },
-          h("span", { style: "font-size:14px;" }, "📊"),
+          h("span", { style: "font-size:15px;" }, "📊"),
           h("h3", { class: "telemetry-title" }, "Context Anatomy & Token Budget"),
-          h("span", { class: "helper-badge finish-badge", style: "font-size:10px;padding:1px 5px;" }, "⚡ Meta AI")),
+          h("span", { class: "helper-badge finish-badge", style: "font-size:11px;padding:1px 5px;" }, "⚡ Meta AI")),
         h("div", { class: "row", style: "gap:6px;" },
           h("button", {
             class: "ghost icon-btn",
-            style: "font-size:11px;",
+            style: "font-size:12px;",
             disabled: isBusy,
             onClick: () => post({ type: "analyzeTelemetry", captureId: capture.id }),
             title: "Re-run Meta AI architectural decomposition and telemetry on this capture",
@@ -1601,48 +1953,162 @@ let detailScrollTop = 0;
 
   function attributeMessage(captureId, messageIndex, content) {
     attributingMessage = captureId + ":" + messageIndex;
-    render();
+    renderKeepingSection("message-" + captureId + "-" + messageIndex);
     post({ type: "attributeMessage", captureId: captureId, messageIndex: messageIndex, content: content });
   }
 
-  function renderSpan(capture, span) {
+  function attributeSubSpan(captureId, messageIndex, spanId, content) {
+    attributingMessage = captureId + ":" + messageIndex + ":" + spanId;
+    renderKeepingSection("span-" + captureId + ":" + spanId);
+    post({ type: "attributeMessage", captureId: captureId, messageIndex: messageIndex, content: content });
+  }
+
+  function renderSpan(capture, span, spanIndex, messageIndex, prevSpan) {
     const key = capture.id + ":" + span.id;
     const selected = key === selectedSpan;
-    const kind = span.kind === "runtime"
+    const isFile = span.kind === "file";
+    const isRuntime = span.kind === "runtime";
+    const isAttributed = span.source === "attributed";
+    const isReported = span.source === "reported";
+
+    const kind = isRuntime
       ? "runtime"
-      : span.source === "attributed"
+      : isAttributed
         ? "attributed"
-        : span.source === "reported"
+        : isReported
           ? "reported"
           : "file";
+
     const body = h("pre", null, span.text);
-    const isAttributed = span.source === "attributed";
     const title = isAttributed && span.explanation
       ? "Attributed by Meta AI: " + span.explanation + (span.confidence ? " (confidence: " + Math.round(span.confidence * 100) + "%)" : "")
       : span.label;
     const displayLabel = isAttributed ? "✨ " + span.label : span.label;
 
-    const block = h("div", { class: "block " + kind + (selected ? " selected" : ""), id: "span-" + key },
-      span.canOpen
-        ? h("button", { class: "block-head" + (isAttributed ? " block-head-attributed" : ""), onClick: () => openSpan(capture, span), title: title }, displayLabel)
-        : h("div", { class: "block-label", title: title }, displayLabel),
+    const activeScope = state.helper && state.helper.activeScope;
+    const isSpanScoped = sectionScopeMatches(activeScope, span.id, ["span-" + key]);
+
+    const isAttributingThis = attributingMessage === (capture.id + ":" + messageIndex + ":" + span.id);
+
+    const boundaryDivider = (prevSpan && prevSpan.kind !== span.kind)
+      ? h("div", { class: "block-boundary-divider" },
+          isRuntime
+            ? "⚡ Injected Dynamic Runtime Content"
+            : "📄 Grounded Source Template File")
+      : null;
+
+    let originBadgeClass = "block-origin-file";
+    let originText = "📄 Template File";
+    if (isAttributed) {
+      originBadgeClass = "block-origin-attributed";
+      originText = "✨ Attributed Template";
+    } else if (isReported) {
+      originBadgeClass = "block-origin-reported";
+      originText = "📄 Marked Template";
+    } else if (isRuntime) {
+      originBadgeClass = "block-origin-runtime";
+      originText = "⚡ Dynamic Runtime State";
+    }
+
+    const scopeLabel = (isFile || isAttributed)
+      ? ("Template: " + (span.file || "source file"))
+      : ("Runtime State in message #" + (messageIndex !== undefined ? (messageIndex + 1) : 1));
+
+    const spanScope = {
+      kind: "section",
+      sectionId: span.id,
+      messageIndex: messageIndex,
+      label: scopeLabel,
+    };
+
+    const blockHeader = h("div", {
+      class: "block-header",
+      style: "cursor:pointer;",
+      onClick: scopeHeaderClick(spanScope),
+      title: "Click to scope Meta AI to this prompt slice · click again to clear",
+    },
+      h("div", { class: "row", style: "gap:6px;align-items:center;flex-wrap:wrap;" },
+        h("span", { class: "block-origin-badge " + originBadgeClass }, originText),
+        span.file ? h("span", { class: "quiet", style: "font-size:12px;" }, span.file + (span.startLine ? (" · line " + span.startLine + (span.endLine && span.endLine !== span.startLine ? "–" + span.endLine : "")) : "")) : null,
+        isSpanScoped
+          ? h("span", { class: "scope-target-badge row", style: "gap:4px;align-items:center;" },
+              "🎯 Active Scope",
+              h("button", {
+                class: "scope-unscope-btn",
+                onClick: (e) => {
+                  e.stopPropagation();
+                  clearTargetScope();
+                },
+                title: "Remove this slice from scope",
+              }, "✕"))
+          : null),
+      h("div", { class: "row", style: "gap:4px;align-items:center;" },
+        h("button", {
+          class: "ghost ask-ai-btn",
+          onClick: (e) => {
+            e.stopPropagation();
+            setTargetScope(spanScope);
+          },
+          title: "Scope Meta AI questions to this " + (isRuntime ? "runtime state" : "template file"),
+        }, "💬 Ask AI"),
+        isRuntime
+          ? h("button", {
+              class: "ghost attribution-btn",
+              disabled: isAttributingThis || (state.helper && state.helper.busy),
+              onClick: (e) => {
+                e.stopPropagation();
+                attributeSubSpan(capture.id, messageIndex, span.id, span.text);
+              },
+              title: "Search workspace and attribute this specific unlinked runtime section using Meta AI",
+            }, isAttributingThis ? "Tracing…" : "✨ Trace Section in Code")
+          : (span.canOpen
+              ? h("button", {
+                  class: "ghost icon-btn",
+                  onClick: (e) => {
+                    e.stopPropagation();
+                    openSpan(capture, span);
+                  },
+                  title: "Open " + span.file + " in editor",
+                }, "Open in Editor ↗")
+              : null)));
+
+    const blockClasses = [
+      "block",
+      kind,
+      selected ? "selected" : "",
+      isSpanScoped ? "is-scoped" : "",
+    ].filter(Boolean).join(" ");
+
+    const block = h("div", {
+      class: blockClasses,
+      id: "span-" + key,
+      onClick: () => {
+        if (hasActiveTextSelection()) {
+          return;
+        }
+        if (!selected) {
+          focusSpan(capture, span.id);
+        }
+      },
+    },
+      blockHeader,
       body);
+
+    if (boundaryDivider) {
+      return h("div", null, boundaryDivider, block);
+    }
     return block;
   }
 
   function openSpan(capture, span) {
     selectedSpan = capture.id + ":" + span.id;
     post({ type: "openSpan", captureId: capture.id, spanId: span.id });
-    render();
+    renderKeepingSection("span-" + capture.id + ":" + span.id);
   }
 
   function focusSpan(capture, id) {
     selectedSpan = capture.id + ":" + id;
-    render();
-    const node = document.getElementById("span-" + selectedSpan);
-    if (node) {
-      node.scrollIntoView({ block: "nearest" });
-    }
+    renderKeepingSection("span-" + capture.id + ":" + id);
   }
 
   function exactHelp() {

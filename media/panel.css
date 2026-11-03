@@ -1,5 +1,6 @@
 :root {
   color-scheme: light dark;
+  --ct-ui-font-offset: 1px;
 }
 
 * {
@@ -17,7 +18,7 @@ body {
   color: var(--vscode-foreground);
   background: var(--vscode-sideBar-background, var(--vscode-editor-background));
   font-family: var(--vscode-font-family);
-  font-size: var(--vscode-font-size, 13px);
+  font-size: calc(var(--vscode-font-size, 13px) + var(--ct-ui-font-offset));
   line-height: 1.45;
 }
 
@@ -72,13 +73,13 @@ input:focus-visible {
 
 h1 {
   margin: 0;
-  font-size: 16px;
+  font-size: 17px;
   font-weight: 600;
 }
 
 h2 {
   margin: 0 0 8px;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
 }
 
@@ -335,7 +336,7 @@ body.is-resizing-row * {
 }
 
 .rail-toggle-btn {
-  font-size: 11px;
+  font-size: 12px;
   padding: 4px 6px;
   border-radius: 4px;
   color: var(--vscode-foreground);
@@ -345,7 +346,7 @@ body.is-resizing-row * {
 .rail-vertical-label {
   writing-mode: vertical-rl;
   transform: rotate(180deg);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   color: var(--vscode-descriptionForeground);
   letter-spacing: 0.5px;
@@ -389,7 +390,7 @@ body[data-surface="editor"] .layout-editor > main.detail {
 }
 
 .main-view-tabs .tab-btn {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
   padding: 5px 12px;
   border-radius: 4px;
@@ -445,7 +446,7 @@ body[data-surface="editor"] .layout-editor > main.detail {
 
 .main-chat-container .helper-item {
   max-width: 960px;
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.6;
   padding: 12px 16px;
 }
@@ -455,7 +456,7 @@ body[data-surface="editor"] .layout-editor > main.detail {
 }
 
 .main-chat-container .helper-input-row textarea.helper-input {
-  font-size: 13px;
+  font-size: 14px;
   padding: 8px 12px;
 }
 
@@ -531,7 +532,7 @@ body[data-surface="editor"] .layout-editor > main.detail {
 
 .quiet,
 .meta {
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .banner {
@@ -722,7 +723,7 @@ body[data-surface="editor"] .layout-editor > main.detail {
 }
 
 .attribution-btn {
-  font-size: 11px;
+  font-size: 12px;
   padding: 2px 8px;
   margin: 0;
   display: inline-flex;
@@ -732,7 +733,7 @@ body[data-surface="editor"] .layout-editor > main.detail {
 
 .block-label {
   padding: 6px 10px 0;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--vscode-descriptionForeground);
 }
 
@@ -743,7 +744,7 @@ body[data-surface="editor"] .layout-editor > main.detail {
   white-space: pre-wrap;
   word-break: break-word;
   font-family: var(--vscode-editor-font-family, monospace);
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.4;
 }
 
@@ -785,7 +786,7 @@ select option {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--vscode-descriptionForeground, var(--vscode-foreground));
 }
 
@@ -817,7 +818,7 @@ details.help pre {
   white-space: pre-wrap;
   word-break: break-word;
   font-family: var(--vscode-editor-font-family, monospace);
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .clue {
@@ -863,7 +864,7 @@ details.help pre {
 }
 
 .helper-model-pill {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   padding: 1px 7px;
   border-radius: 10px;
@@ -872,7 +873,7 @@ details.help pre {
 }
 
 .helper-context-pill {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   padding: 1px 7px;
   border-radius: 10px;
@@ -882,7 +883,7 @@ details.help pre {
 }
 
 .chat-indicator-pill {
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   padding: 1px 5px;
   border-radius: 8px;
@@ -905,7 +906,7 @@ details.help pre {
 
 .tab-btn {
   flex: 1;
-  font-size: 11.5px;
+  font-size: 12.5px;
   font-weight: 600;
   padding: 5px 8px;
   border-radius: 4px;
@@ -963,7 +964,7 @@ body[data-surface="editor"] .helper-feed {
 
 .collapse-arrow {
   display: inline-block;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--vscode-descriptionForeground);
   width: 12px;
   text-align: center;
@@ -974,7 +975,7 @@ body[data-surface="editor"] .helper-feed {
 }
 
 .icon-btn {
-  font-size: 11px;
+  font-size: 12px;
   padding: 2px 7px;
   border-radius: 4px;
 }
@@ -995,7 +996,7 @@ body[data-surface="editor"] .helper-feed {
   gap: 5px;
   padding: 8px 10px;
   border-radius: 6px;
-  font-size: 12px;
+  font-size: 13px;
   border: 1px solid transparent;
 }
 
@@ -1006,7 +1007,7 @@ body[data-surface="editor"] .helper-feed {
 }
 
 .helper-badge {
-  font-size: 10.5px;
+  font-size: 11.5px;
   font-weight: 600;
   padding: 1px 6px;
   border-radius: 4px;
@@ -1074,7 +1075,7 @@ body[data-surface="editor"] .helper-feed {
 
 .helper-code {
   font-family: var(--vscode-editor-font-family, monospace);
-  font-size: 11.5px;
+  font-size: 12.5px;
   color: #38bdf8;
   word-break: break-all;
 }
@@ -1082,7 +1083,7 @@ body[data-surface="editor"] .helper-feed {
 .helper-pre-args {
   margin: 4px 0 0;
   font-family: var(--vscode-editor-font-family, monospace);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--vscode-descriptionForeground);
   white-space: pre-wrap;
   word-break: break-word;
@@ -1098,7 +1099,7 @@ body[data-surface="editor"] .helper-feed {
 .helper-pre {
   margin: 0;
   font-family: var(--vscode-editor-font-family, monospace);
-  font-size: 11px;
+  font-size: 12px;
   white-space: pre-wrap;
   word-break: break-word;
   color: var(--vscode-foreground);
@@ -1132,12 +1133,12 @@ body[data-surface="editor"] .helper-feed {
   gap: 6px;
   align-items: center;
   color: var(--vscode-descriptionForeground);
-  font-size: 11.5px;
+  font-size: 12.5px;
   padding: 2px 4px;
 }
 
 .helper-status-icon {
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .helper-status-text {
@@ -1145,7 +1146,7 @@ body[data-surface="editor"] .helper-feed {
 }
 
 .helper-time {
-  font-size: 10.5px;
+  font-size: 11.5px;
   color: var(--vscode-descriptionForeground);
   margin-left: auto;
 }
@@ -1165,7 +1166,7 @@ body[data-surface="editor"] .helper-feed {
   background: color-mix(in srgb, var(--vscode-foreground, #d4d4d4) 3%, var(--vscode-editor-background, #1e1e1e));
   cursor: pointer;
   user-select: none;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--vscode-descriptionForeground);
   transition: background 0.15s ease;
 }
@@ -1180,7 +1181,7 @@ body[data-surface="editor"] .helper-feed {
 }
 
 .quick-actions-mini-tag {
-  font-size: 10px;
+  font-size: 11px;
   padding: 1px 6px;
   border-radius: 8px;
   background: color-mix(in srgb, var(--vscode-foreground, #d4d4d4) 10%, transparent);
@@ -1200,7 +1201,7 @@ body[data-surface="editor"] .helper-feed {
 }
 
 .chip-btn {
-  font-size: 11px;
+  font-size: 12px;
   padding: 3px 9px;
   border-radius: 12px;
   background: color-mix(in srgb, var(--vscode-foreground, #d4d4d4) 8%, var(--vscode-editor-background, #1e1e1e));
@@ -1237,7 +1238,7 @@ body[data-surface="editor"] .helper-feed {
   border: 1px solid var(--vscode-input-border, color-mix(in srgb, var(--vscode-foreground, #d4d4d4) 20%, transparent));
   border-radius: 4px;
   padding: 6px 10px;
-  font-size: 12px;
+  font-size: 13px;
   font-family: inherit;
   resize: none;
   line-height: 1.4;
@@ -1253,12 +1254,12 @@ body[data-surface="editor"] .helper-feed {
 
 .helper-send-btn {
   padding: 4px 12px;
-  font-size: 12px;
+  font-size: 13px;
   flex-shrink: 0;
 }
 
 .pill-jump {
-  font-size: 11px;
+  font-size: 12px;
   padding: 3px 9px;
   border-radius: 12px;
   background: color-mix(in srgb, #38bdf8 15%, var(--vscode-editor-background, #1e1e1e));
@@ -1286,17 +1287,17 @@ body[data-surface="editor"] .helper-feed {
 .badge-busy {
   color: #38bdf8;
   font-weight: 600;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .badge-ready {
   color: #4ade80;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .badge-idle {
   color: var(--vscode-descriptionForeground);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 /* Mobile & Android Device Bridging (Loop 7) */
@@ -1306,7 +1307,7 @@ body[data-surface="editor"] .helper-feed {
   border: 1px solid color-mix(in srgb, #3ddc84 32%, transparent);
   border-radius: 4px;
   padding: 1px 6px;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 500;
   display: inline-flex;
   align-items: center;
@@ -1324,7 +1325,7 @@ body[data-surface="editor"] .helper-feed {
   color: var(--vscode-descriptionForeground);
   border-radius: 4px;
   padding: 1px 6px;
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .mobile-security-card {
@@ -1365,7 +1366,7 @@ body[data-surface="editor"] .helper-feed {
 }
 
 .telemetry-title {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
   display: flex;
   align-items: center;
@@ -1402,7 +1403,7 @@ body[data-surface="editor"] .helper-feed {
   display: flex;
   flex-wrap: wrap;
   gap: 10px 14px;
-  font-size: 11.5px;
+  font-size: 12.5px;
 }
 
 .telemetry-legend-item {
@@ -1422,7 +1423,7 @@ body[data-surface="editor"] .helper-feed {
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  font-size: 11.5px;
+  font-size: 12.5px;
   padding: 6px 10px;
   border-radius: 4px;
   background: color-mix(in srgb, #f59e0b 14%, var(--vscode-editor-background, #1e1e1e));
@@ -1458,7 +1459,7 @@ body[data-surface="editor"] .helper-feed {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   padding: 2px 7px;
   border-radius: 4px;
@@ -1519,7 +1520,7 @@ body[data-surface="editor"] .helper-feed {
 }
 
 .anatomy-meta {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--vscode-descriptionForeground);
 }
 
@@ -1530,7 +1531,7 @@ body[data-surface="editor"] .helper-feed {
 }
 
 .anatomy-what {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--vscode-foreground);
   display: flex;
@@ -1539,7 +1540,7 @@ body[data-surface="editor"] .helper-feed {
 }
 
 .anatomy-why {
-  font-size: 11.5px;
+  font-size: 12.5px;
   color: var(--vscode-descriptionForeground);
   line-height: 1.4;
   display: flex;
@@ -1548,14 +1549,14 @@ body[data-surface="editor"] .helper-feed {
 }
 
 .anatomy-prefix {
-  font-size: 10.5px;
+  font-size: 11.5px;
   font-weight: 700;
   letter-spacing: 0.3px;
   opacity: 0.85;
 }
 
 .anatomy-warning-pill {
-  font-size: 11px;
+  font-size: 12px;
   padding: 3px 8px;
   border-radius: 4px;
   background: color-mix(in srgb, #f59e0b 14%, var(--vscode-editor-background, #1e1e1e));
@@ -1564,7 +1565,7 @@ body[data-surface="editor"] .helper-feed {
 }
 
 .anatomy-second-opinion {
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.45;
   padding: 5px 8px;
   border-radius: 4px;
@@ -1599,7 +1600,7 @@ body[data-surface="editor"] .helper-feed {
 .badge-verdict {
   display: inline-flex;
   align-items: center;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   padding: 1px 6px;
   border-radius: 3px;
@@ -1653,7 +1654,7 @@ body[data-surface="editor"] .helper-feed {
 }
 
 .tools-summary-title {
-  font-size: 11.5px;
+  font-size: 12.5px;
   font-weight: 600;
   color: var(--vscode-foreground);
 }
@@ -1689,7 +1690,7 @@ body[data-surface="editor"] .helper-feed {
 
 .tool-name-badge {
   font-family: var(--vscode-editor-font-family, monospace);
-  font-size: 11.5px;
+  font-size: 12.5px;
   font-weight: 600;
   color: var(--vscode-charts-blue, #38bdf8);
   background: color-mix(in srgb, var(--vscode-charts-blue, #38bdf8) 12%, transparent);
@@ -1732,7 +1733,7 @@ body[data-surface="editor"] .helper-feed {
 }
 
 .scope-label-prefix {
-  font-size: 10.5px;
+  font-size: 11.5px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.3px;
@@ -1745,7 +1746,7 @@ body[data-surface="editor"] .helper-feed {
   gap: 6px;
   padding: 2px 8px;
   border-radius: 12px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   max-width: 240px;
 }
@@ -1774,7 +1775,7 @@ body[data-surface="editor"] .helper-feed {
   color: inherit;
   cursor: pointer;
   padding: 0 2px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   opacity: 0.7;
 }
@@ -1784,12 +1785,12 @@ body[data-surface="editor"] .helper-feed {
 }
 
 .scope-reset-link {
-  font-size: 10.5px;
+  font-size: 11.5px;
   padding: 1px 6px;
 }
 
 .ask-ai-btn {
-  font-size: 11px;
+  font-size: 12px;
   padding: 2px 7px;
   border-radius: 4px;
   color: #c084fc;
@@ -1816,12 +1817,12 @@ body[data-surface="editor"] .helper-feed {
 }
 
 .selection-bar-text {
-  font-size: 11.5px;
+  font-size: 12.5px;
   font-weight: 500;
 }
 
 .selection-ask-btn {
-  font-size: 11px;
+  font-size: 12px;
   padding: 2px 8px;
 }
 
@@ -1845,7 +1846,7 @@ body[data-surface="editor"] .helper-feed {
 
 .patch-file-pill {
   font-family: var(--vscode-editor-font-family, monospace);
-  font-size: 11px;
+  font-size: 12px;
   padding: 1px 6px;
   border-radius: 4px;
   background: color-mix(in srgb, var(--vscode-foreground, #d4d4d4) 10%, transparent);
@@ -1853,7 +1854,7 @@ body[data-surface="editor"] .helper-feed {
 }
 
 .patch-applied-pill {
-  font-size: 10.5px;
+  font-size: 11.5px;
   font-weight: 600;
   padding: 1px 6px;
   border-radius: 4px;
@@ -1863,7 +1864,7 @@ body[data-surface="editor"] .helper-feed {
 }
 
 .patch-impact-pill {
-  font-size: 10.5px;
+  font-size: 11.5px;
   font-weight: 600;
   padding: 1px 6px;
   border-radius: 4px;
@@ -1873,14 +1874,14 @@ body[data-surface="editor"] .helper-feed {
 
 .patch-description {
   margin: 0;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--vscode-foreground);
 }
 
 .patch-explanation {
   margin: 2px 0 0;
-  font-size: 11.5px;
+  font-size: 12.5px;
   color: var(--vscode-descriptionForeground);
   line-height: 1.4;
 }
@@ -1891,7 +1892,7 @@ body[data-surface="editor"] .helper-feed {
   border: 1px solid color-mix(in srgb, var(--vscode-foreground, #d4d4d4) 15%, transparent);
   background: var(--vscode-editor-background, #1e1e1e);
   font-family: var(--vscode-editor-font-family, monospace);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.45;
   overflow-x: auto;
   max-height: 200px;
@@ -1927,7 +1928,7 @@ body[data-surface="editor"] .helper-feed {
 }
 
 .patch-apply-btn {
-  font-size: 11.5px;
+  font-size: 12.5px;
   padding: 3px 10px;
   background: var(--vscode-button-background, #0e639c);
   color: var(--vscode-button-foreground, #ffffff);

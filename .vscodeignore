@@ -1,0 +1,11 @@
+.vscode/**
+.cursor/**
+MetaContest/**
+docs/**
+src/**
+test/**
+.gitignore
+tsconfig.json
+**/*.map
+**/*.ts
+node_modules/**

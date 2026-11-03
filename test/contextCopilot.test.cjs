@@ -250,6 +250,10 @@ test("Meta AI Prompt Co-Pilot detects contradictions via search_context and resp
   assert.ok(finalMessage.includes("FooCorp"));
   assert.ok(Array.isArray(result.messages));
   assert.ok(result.messages.length >= 3);
+  const lastMsg = result.messages[result.messages.length - 1];
+  assert.equal(lastMsg.role, "tool");
+  assert.equal(lastMsg.tool_call_id, "call_respond_1");
+  assert.equal(lastMsg.content, "Delivered.");
 });
 
 test("Meta AI Prompt Co-Pilot proposes template patch for code optimization", async () => {
@@ -257,6 +261,7 @@ test("Meta AI Prompt Co-Pilot proposes template patch for code optimization", as
   const contextTools = createContextTools({
     capture,
     projectPath: "/fake/project",
+    finishOnPatch: true,
     fsImpl: {
       existsSync: () => true,
       readFile: async () =>
@@ -392,6 +397,9 @@ test("Phase 3 Webview UI: media/panel.js incorporates Scope Bar, Quick Action Ch
   // 4. Interactive Patch Proposal Card
   assert.ok(panelJs.includes("renderPatchCard"), "Expected renderPatchCard function in panel.js");
   assert.ok(panelJs.includes("applyPatch"), "Expected applyPatch dispatch in panel.js");
+  assert.ok(panelJs.includes("applyAllPatches"), "Expected applyAllPatches dispatch in panel.js");
+  assert.ok(panelJs.includes("renderMarkdown"), "Expected markdown rendering for assistant chat replies in panel.js");
+  assert.ok(panelJs.includes("syncSelectionBar"), "Expected selection bar sync without full re-render in panel.js");
 });
 
 test("Phase 3 Webview CSS: media/panel.css incorporates styles for scope bar, patch diff viewer, and floating selection", () => {
@@ -811,4 +819,76 @@ test("Conversational Co-Pilot chats with user: explains what, why, and alternati
   assert.ok(respondMessage.includes("Option A"));
   assert.ok(respondMessage.includes("Option B"));
   assert.ok(respondMessage.includes("Option C"));
+});
+
+test("runHarness executes every parallel propose_template_patch before finishing the turn", async () => {
+  const capture = createMockMultiSectionCapture();
+  const captured = [];
+  const contextTools = createContextTools({
+    capture,
+    projectPath: "/fake/project",
+    onPatchProposed: (patch) => captured.push(patch),
+    fsImpl: { existsSync: () => true },
+  });
+  const respondTool = {
+    name: "respond",
+    description: "Finish",
+    parameters: { type: "object", properties: { message: { type: "string" } }, required: ["message"] },
+    run: (args) => ({
+      content: "ok",
+      finish: { explanation: args.message, reason: args.message },
+    }),
+  };
+
+  let turn = 0;
+  const result = await runHarness({
+    system: "Co-pilot",
+    user: "Fix both rules",
+    tools: [...contextTools, respondTool],
+    stepCap: 4,
+    complete: async () => {
+      turn += 1;
+      if (turn === 1) {
+        return {
+          content: "Drafting two related template edits.",
+          toolCalls: [
+            {
+              id: "patch_a",
+              name: "propose_template_patch",
+              arguments: JSON.stringify({
+                file: "prompts/support.prompt",
+                startLine: 2,
+                endLine: 2,
+                originalCode: "Rule 1",
+                replacementCode: "Rule 1 updated",
+                explanation: "First fix",
+              }),
+            },
+            {
+              id: "patch_b",
+              name: "propose_template_patch",
+              arguments: JSON.stringify({
+                file: "prompts/support.prompt",
+                startLine: 4,
+                endLine: 4,
+                originalCode: "Rule 3",
+                replacementCode: "Rule 3 updated",
+                explanation: "Second fix",
+              }),
+            },
+          ],
+        };
+      }
+      return {
+        content: "Done explaining.",
+        toolCalls: [{ id: "resp", name: "respond", arguments: JSON.stringify({ message: "Both patches are ready." }) }],
+      };
+    },
+  });
+
+  assert.equal(captured.length, 2);
+  assert.equal(captured[0].startLine, 2);
+  assert.equal(captured[1].startLine, 4);
+  assert.ok(result.finish);
+  assert.equal(result.finish.explanation, "Both patches are ready.");
 });

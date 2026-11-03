@@ -99,6 +99,51 @@ function helperEndpoint(baseUrl: string, suffix: string): string {
   return url.href;
 }
 
+/**
+ * Normalizes persisted chat history so follow-up helper requests stay API-compatible.
+ * Muse/OpenAI-compatible hosts reject null assistant content and assistant tool_calls without matching tool messages.
+ */
+export function sanitizeMessagesForHelperApi(messages: ChatMessage[]): ChatMessage[] {
+  const normalized = messages.map((message) => ({
+    ...message,
+    content: message.content ?? "",
+  }));
+
+  const valid: ChatMessage[] = [];
+  for (let i = 0; i < normalized.length; i += 1) {
+    const msg = normalized[i];
+    if (msg.role === "assistant" && msg.tool_calls?.length) {
+      const needed = msg.tool_calls.map((call) => call.id);
+      const toolMessages: ChatMessage[] = [];
+      const answered = new Set<string>();
+      let j = i + 1;
+      while (j < normalized.length && normalized[j].role === "tool") {
+        toolMessages.push(normalized[j]);
+        const toolCallId = normalized[j].tool_call_id;
+        if (toolCallId) {
+          answered.add(toolCallId);
+        }
+        j += 1;
+      }
+      if (!needed.every((id) => answered.has(id))) {
+        if (j > i + 1) {
+          i = j - 1;
+        }
+        continue;
+      }
+      valid.push(msg);
+      valid.push(...toolMessages);
+      i = j - 1;
+      continue;
+    }
+    if (msg.role === "tool") {
+      continue;
+    }
+    valid.push(msg);
+  }
+  return valid;
+}
+
 export async function completeChat(options: {
   baseUrl: string;
   apiKey: string;
@@ -110,7 +155,7 @@ export async function completeChat(options: {
   const fetchImpl = options.fetchImpl ?? defaultFetch();
   const requestBody: Record<string, unknown> = {
     model: options.model,
-    messages: options.messages,
+    messages: sanitizeMessagesForHelperApi(options.messages),
   };
   if (options.tools && options.tools.length > 0) {
     requestBody.tools = options.tools;
@@ -126,7 +171,12 @@ export async function completeChat(options: {
   });
   const raw = await response.text();
   if (!response.ok) {
-    throw new Error(`The helper model returned HTTP ${response.status}.`);
+    const detail = helperErrorDetail(raw);
+    throw new Error(
+      detail
+        ? `The helper model returned HTTP ${response.status}: ${detail}`
+        : `The helper model returned HTTP ${response.status}.`,
+    );
   }
   let json: unknown;
   try {
@@ -135,6 +185,21 @@ export async function completeChat(options: {
     throw new Error("The helper model returned an unreadable response.");
   }
   return turnFromResponse(json);
+}
+
+function helperErrorDetail(raw: string): string | null {
+  if (!raw.trim()) {
+    return null;
+  }
+  try {
+    const json = JSON.parse(raw) as { error?: { message?: unknown }; message?: unknown };
+    const fromError = json.error && typeof json.error.message === "string" ? json.error.message.trim() : "";
+    const fromMessage = typeof json.message === "string" ? json.message.trim() : "";
+    const detail = fromError || fromMessage;
+    return detail || null;
+  } catch {
+    return null;
+  }
 }
 
 function defaultFetch(): HelperFetch {

@@ -60,7 +60,9 @@ export async function runHarness<T>(options: {
       type: "function",
       function: { name: call.name, arguments: call.arguments },
     }));
-    messages.push({ role: "assistant", content: turn.content, tool_calls: calls });
+    const assistantContent = turn.content && turn.content.trim() ? turn.content : "";
+    messages.push({ role: "assistant", content: assistantContent, tool_calls: calls });
+    let turnFinish: T | undefined;
     for (const call of turn.toolCalls) {
       options.onTool?.(call.name);
       let parsedArgs: unknown = call.arguments;
@@ -77,11 +79,18 @@ export async function runHarness<T>(options: {
         content: outcome.content,
         isFinish: outcome.finish !== undefined,
       });
+      messages.push({ role: "tool", content: outcome.content, tool_call_id: call.id });
       if (outcome.finish !== undefined) {
         options.onEvent?.({ kind: "finish", finish: outcome.finish });
-        return { finish: outcome.finish, steps, messages };
+        turnFinish = outcome.finish;
+        // Patch proposals must not end the turn early; finish the full parallel batch first.
+        if (call.name !== "propose_template_patch") {
+          return { finish: outcome.finish, steps, messages };
+        }
       }
-      messages.push({ role: "tool", content: outcome.content, tool_call_id: call.id });
+    }
+    if (turnFinish !== undefined) {
+      return { finish: turnFinish, steps, messages };
     }
   }
   return { finish: null, steps, messages };

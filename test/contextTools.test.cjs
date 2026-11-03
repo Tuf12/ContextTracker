@@ -244,7 +244,6 @@ test("createContextTools registers the four context sensory tools with runnable 
     replacementCode: "New Line 1",
     explanation: "Shorten prompt",
   });
-  assert.ok(patchRes.finish);
-  assert.equal(patchRes.finish.file, "prompts/system.prompt");
   assert.ok(patchRes.content.includes("Template patch proposal created successfully"));
+  assert.equal(patchRes.finish, undefined);
 });
