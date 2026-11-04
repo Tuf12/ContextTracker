@@ -12,7 +12,7 @@
 > **Problem Statement:** *Build for Your World* | **Track:** *Indie Developer* & *Best Agentic Use-Case*  
 > **Core AI Brain:** Meta Muse Spark 1.3 & Muse Wonder via [Meta Model API](https://api.meta.ai/v1)  
 > **Original Work Declaration:** 100% of Context Tracker was conceived and built from scratch during the hackathon building period (Oct 27 – Nov 4, 2026).  
-> 📺 **Demo Walkthrough & Video:** [Watch the 3-Minute Demo (YouTube/Loom)](#) · [Comprehensive Hackathon Showcase Guide](./HACKATHON_SHOWCASE.md)
+> 📺 **Demo Walkthrough & Video:** [Watch the 3-Minute Demo (YouTube)](https://youtu.be/n7IsV_Dyu9M) · [Comprehensive Hackathon Showcase Guide](./HACKATHON_SHOWCASE.md)
 
 ---
 

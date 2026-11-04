@@ -2558,7 +2558,7 @@ export class TrackerApp {
         user: query,
         history: threadHistory,
         tools: chatTools,
-        stepCap: 10,
+        stepCap: 20,
         allowDirectAnswer: true,
         complete: (messages, toolsList) =>
           completeChat({

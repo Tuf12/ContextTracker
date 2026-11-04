@@ -41,6 +41,7 @@ let scrollAnchorAfterRender = null;
 
   const expandedToolSchemas = new Set();
   const showRawToolsJson = new Map();
+  const expandedSectionTexts = new Set();
 
   function saveLayoutState(updates) {
     try {
@@ -96,6 +97,55 @@ let scrollAnchorAfterRender = null;
       }
     }, 50);
   });
+
+  document.addEventListener("click", (e) => {
+    const btn = e.target && e.target.closest ? e.target.closest(".section-jump-link") : null;
+    if (!btn) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const sectionId = btn.getAttribute("data-section-id");
+    if (sectionId) {
+      jumpToSectionFromChat(sectionId);
+    }
+  });
+
+  function jumpToSectionFromChat(sectionId) {
+    if (!sectionId) return;
+
+    const capture = state && state.selected;
+    if (!capture) return;
+
+    const wasInChatTab = mainViewTab === "chat";
+    if (wasInChatTab) {
+      mainViewTab = "prompt";
+      saveLayoutState({ mainViewTab: "prompt" });
+      render();
+    }
+
+    const sec = (capture.sections || []).find((s) => s.sectionId === sectionId);
+    let messageIndex = sec ? sec.messageIndex : undefined;
+    if (messageIndex === undefined) {
+      const msgMatch = sectionId.match(/^msg-(\d+)/);
+      if (msgMatch) {
+        messageIndex = parseInt(msgMatch[1], 10);
+      } else if (sectionId.startsWith("history-")) {
+        const hMatch = sectionId.match(/^history-(\d+)/);
+        if (hMatch) {
+          messageIndex = parseInt(hMatch[1], 10);
+        }
+      }
+    }
+
+    const doScroll = () => {
+      scrollToSectionOrMessage(capture.id, messageIndex, sectionId);
+    };
+
+    if (wasInChatTab) {
+      setTimeout(doScroll, 80);
+    } else {
+      doScroll();
+    }
+  }
 
   window.addEventListener("message", (event) => {
     if (!event.data || event.data.type !== "state") {
@@ -1386,13 +1436,52 @@ let scrollAnchorAfterRender = null;
     return "#";
   }
 
+  function formatSectionJump(sectionId, displayLabel) {
+    const cleanId = escapeHtml(sectionId.trim());
+    const label = displayLabel ? escapeHtml(displayLabel.trim()) : cleanId;
+    return `<button type="button" class="section-jump-link" data-section-id="${cleanId}" title="Jump to section ${cleanId} in Context Window"><span class="jump-icon">🎯</span> <code>${label}</code><span class="jump-arrow">↗</span></button>`;
+  }
+
+  function isSectionIdPattern(str) {
+    if (!str) return false;
+    const clean = str.trim();
+    return /^(?:msg-\d+(?:-[a-zA-Z0-9_-]+)*|history-\d+-\d+)$/.test(clean);
+  }
+
+  function linkifyBareSectionIds(html) {
+    return html.split(/(<[^>]+>)/g).map((part) => {
+      if (part.startsWith("<")) {
+        return part;
+      }
+      return part.replace(/\b(msg-\d+(?:-[a-zA-Z0-9_-]+)*|history-\d+-\d+)\b/g, (_, id) => {
+        return formatSectionJump(id);
+      });
+    }).join("");
+  }
+
   function renderInlineMarkdown(escaped) {
-    return escaped
-      .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+    let res = escaped;
+    // 1. Markdown links first to protect [label](url)
+    res = res.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, url) =>
+      `<a href="${sanitizeMarkdownHref(url)}">${label}</a>`);
+    // 2. Bracketed section titles, e.g. [Section #1: msg-0-sys-8] or [msg-0-sys-8]
+    res = res.replace(/\[(?:Section\s*(?:#\d+[:\s]*)?)?(msg-\d+(?:-[a-zA-Z0-9_-]+)*|history-\d+-\d+)\]/g, (_, id) => {
+      return formatSectionJump(id);
+    });
+    // 3. Inline backticks: section ID -> interactive jump button; otherwise normal <code>
+    res = res.replace(/`([^`\n]+)`/g, (_, code) => {
+      if (isSectionIdPattern(code)) {
+        return formatSectionJump(code);
+      }
+      return `<code>${code}</code>`;
+    });
+    // 4. Bold and italic
+    res = res
       .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-      .replace(/\*([^*]+)\*/g, "<em>$1</em>")
-      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, url) =>
-        `<a href="${sanitizeMarkdownHref(url)}">${label}</a>`);
+      .replace(/\*([^*]+)\*/g, "<em>$1</em>");
+    // 5. Bare section IDs in text (safe from touching HTML tags or attributes)
+    res = linkifyBareSectionIds(res);
+    return res;
   }
 
   function renderMarkdown(source) {
@@ -1849,6 +1938,7 @@ let scrollAnchorAfterRender = null;
             },
               h("div", { class: "row", style: "gap:6px;align-items:center;flex-wrap:wrap;" },
                 h("code", { class: "tool-name-badge" }, "🔧 " + (t.toolName || "tool")),
+                h("code", { class: "anatomy-section-id-badge", title: "Section ID: " + t.sectionId }, t.sectionId),
                 h("span", { class: "anatomy-meta" },
                   t.tokenEstimate.toLocaleString("en-US") + " tokens · " + t.tokenPercentage + "% of context"),
                 opinion ? h("span", { class: "badge-verdict " + verdictClass }, opinion.verdictLabel) : null,
@@ -1938,6 +2028,10 @@ let scrollAnchorAfterRender = null;
       label: telemetry.heading || telemetry.what || telemetry.categoryLabel,
     };
 
+    const rawSection = (capture.sections || []).find((s) => s.sectionId === telemetry.sectionId);
+    const textKey = capture.id + ":" + telemetry.sectionId;
+    const isTextOpen = expandedSectionTexts.has(textKey);
+
     return h("div", {
       class: "anatomy-card" + (isScoped ? " is-scoped" : ""),
       id: "section-" + capture.id + "-" + telemetry.sectionId,
@@ -1950,6 +2044,7 @@ let scrollAnchorAfterRender = null;
       },
         h("div", { class: "row", style: "gap:6px;align-items:center;flex-wrap:wrap;" },
           h("span", { class: "badge-category " + catClass }, labelTitle),
+          h("code", { class: "anatomy-section-id-badge", title: "Section ID: " + telemetry.sectionId }, telemetry.sectionId),
           h("span", { class: "anatomy-meta" },
             telemetry.tokenEstimate.toLocaleString("en-US") + " tokens · " + telemetry.tokenPercentage + "% of context"),
           opinion ? h("span", { class: "badge-verdict " + verdictClass }, opinion.verdictLabel) : null,
@@ -1966,6 +2061,21 @@ let scrollAnchorAfterRender = null;
                 }, "✕"))
             : null),
         h("div", { class: "row", style: "gap:4px;align-items:center;" },
+          rawSection && rawSection.content
+            ? h("button", {
+                class: "ghost mini-btn anatomy-text-peek-btn",
+                onClick: (e) => {
+                  e.stopPropagation();
+                  if (isTextOpen) {
+                    expandedSectionTexts.delete(textKey);
+                  } else {
+                    expandedSectionTexts.add(textKey);
+                  }
+                  renderKeepingSection("section-" + capture.id + "-" + telemetry.sectionId);
+                },
+                title: isTextOpen ? "Hide verbatim prompt text" : "Peek verbatim prompt text for this section",
+              }, isTextOpen ? "▼ Hide Text" : "▶ Peek Text")
+            : null,
           h("button", {
             class: "ghost ask-ai-btn",
             onClick: (e) => {
@@ -1999,6 +2109,10 @@ let scrollAnchorAfterRender = null;
         : null,
       telemetry.warning && (!opinion || telemetry.warning !== opinion.advice)
         ? h("div", { class: "anatomy-warning-pill" }, "⚠️ " + telemetry.warning)
+        : null,
+      isTextOpen && rawSection && rawSection.content
+        ? h("div", { class: "anatomy-text-peek-row" },
+            h("pre", { class: "anatomy-section-text-preview" }, rawSection.content))
         : null);
   }
 
@@ -2086,10 +2200,20 @@ let scrollAnchorAfterRender = null;
     if (sectionId) {
       const el = document.getElementById("section-" + captureId + "-" + sectionId);
       if (el) {
-        el.scrollIntoView({ behavior: "smooth", block: "start" });
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
         el.classList.add("highlight-pulse");
-        setTimeout(() => el.classList.remove("highlight-pulse"), 2000);
+        setTimeout(() => el.classList.remove("highlight-pulse"), 2200);
         return;
+      }
+
+      if (sectionId.includes("-tool-")) {
+        const toolsEl = document.getElementById("section-" + captureId + "-tools");
+        if (toolsEl) {
+          toolsEl.scrollIntoView({ behavior: "smooth", block: "center" });
+          toolsEl.classList.add("highlight-pulse");
+          setTimeout(() => toolsEl.classList.remove("highlight-pulse"), 2200);
+          return;
+        }
       }
     }
     scrollToMessage(captureId, messageIndex);
@@ -2108,9 +2232,14 @@ let scrollAnchorAfterRender = null;
   }
 
   function scrollToMessage(captureId, messageIndex) {
+    if (messageIndex === undefined || messageIndex === null) {
+      return;
+    }
     const el = document.getElementById("message-" + captureId + "-" + messageIndex);
     if (el) {
-      el.scrollIntoView({ behavior: "smooth", block: "start" });
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      el.classList.add("highlight-pulse");
+      setTimeout(() => el.classList.remove("highlight-pulse"), 2200);
     }
   }
 
