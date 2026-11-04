@@ -562,6 +562,31 @@ body[data-surface="editor"] .layout-editor > main.detail {
   gap: 6px;
 }
 
+.capture-connect-panel {
+  padding: 10px 12px;
+}
+
+.capture-connect-steps {
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.capture-connect-steps .linkish {
+  font: inherit;
+  color: var(--vscode-textLink-foreground);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.capture-helper-credentials {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--vscode-widget-border, color-mix(in srgb, var(--vscode-foreground, #d4d4d4) 12%, transparent));
+}
+
 .capture-list {
   display: flex;
   flex-direction: column;
@@ -1340,6 +1365,105 @@ body[data-surface="editor"] .helper-feed {
   padding: 8px 10px;
   border-radius: 6px;
   background: color-mix(in srgb, var(--vscode-foreground, #d4d4d4) 3%, var(--vscode-editor-background, #1e1e1e));
+}
+
+/* Multi-Hop Agent Loop Connection & Navigation */
+.run-hop-banner {
+  margin: 4px 0 8px 0;
+  padding: 8px 12px;
+  background: color-mix(in srgb, var(--vscode-charts-blue, #38bdf8) 7%, var(--vscode-editor-background, #1e1e1e));
+  border: 1px solid color-mix(in srgb, var(--vscode-charts-blue, #38bdf8) 25%, transparent);
+  border-left: 3px solid var(--vscode-charts-blue, #38bdf8);
+  border-radius: 6px;
+}
+
+.run-hop-spread {
+  min-height: 28px;
+}
+
+.badge-run {
+  background: color-mix(in srgb, var(--vscode-charts-blue, #38bdf8) 18%, transparent);
+  color: var(--vscode-charts-blue, #38bdf8);
+  border: 1px solid color-mix(in srgb, var(--vscode-charts-blue, #38bdf8) 35%, transparent);
+  border-radius: 4px;
+  padding: 1px 7px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.badge-run-hop {
+  background: color-mix(in srgb, var(--vscode-charts-blue, #38bdf8) 15%, transparent);
+  color: var(--vscode-charts-blue, #38bdf8);
+  border: 1px solid color-mix(in srgb, var(--vscode-charts-blue, #38bdf8) 30%, transparent);
+  border-radius: 10px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.hop-title {
+  color: var(--vscode-foreground);
+}
+
+.hop-user-query {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hop-nav-controls {
+  margin-left: auto;
+}
+
+.hop-nav-btn {
+  font-size: 11px;
+  padding: 2px 8px;
+  height: 24px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.hop-pills-row {
+  display: inline-flex;
+  align-items: center;
+  background: color-mix(in srgb, var(--vscode-foreground, #d4d4d4) 6%, transparent);
+  border-radius: 12px;
+  padding: 1px 3px;
+}
+
+.hop-pill {
+  background: transparent;
+  border: none;
+  border-radius: 10px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 7px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  line-height: 16px;
+}
+
+.hop-pill:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--vscode-foreground, #d4d4d4) 12%, transparent);
+  color: var(--vscode-foreground);
+}
+
+.hop-pill.active {
+  background: var(--vscode-button-background, #0e639c);
+  color: var(--vscode-button-foreground, #ffffff);
+  font-weight: 600;
+  cursor: default;
+}
+
+.hop-pill.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 /* Context Window Anatomy & Telemetry (Loop 6) */

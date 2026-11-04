@@ -15,6 +15,8 @@ import type {
   DiffCapturesResult,
   PromptMessage,
   ReportedSpan,
+  RunHopInfo,
+  RunTrajectoryResult,
   StoredCapture,
   TemplatePatchProposal,
   ViewMessage,
@@ -27,6 +29,7 @@ export type CaptureInput = {
   reported?: ReportedSpan[];
   telemetry?: CaptureTelemetry;
   sections?: ContextSection[];
+  run?: RunHopInfo;
 };
 
 export type SearchContextOptions = {
@@ -473,17 +476,109 @@ export async function proposeTemplatePatch(
 /**
  * Validates whether the document content matches the patch's originalCode at the specified lines.
  * Normalizes line endings (\r\n vs \n) and trailing whitespace to prevent false rejection.
+ * If lines shifted due to earlier patches or minor model line numbering drift, it dynamically
+ * locates the originalCode block in the file and returns resolvedStartLine/resolvedEndLine.
  */
 export function validateTemplatePatchContent(
   fileContent: string,
   startLine: number,
   endLine: number,
   expectedOriginalCode: string,
-): { valid: boolean; actualSnippet?: string; error?: string } {
+  replacementCode?: string,
+): { valid: boolean; actualSnippet?: string; error?: string; resolvedStartLine?: number; resolvedEndLine?: number; alreadyApplied?: boolean } {
   const lines = fileContent.split(/\r?\n/);
   const actualStart = Math.max(1, startLine);
   const actualEnd = Math.min(lines.length, Math.max(actualStart, endLine));
 
+  const normExpected = (expectedOriginalCode || "").replace(/\r\n/g, "\n").trim();
+
+  // 1. Check exact line range first if within bounds
+  if (actualStart <= lines.length) {
+    const actualSnippet = lines.slice(actualStart - 1, actualEnd).join("\n");
+    const normActual = actualSnippet.replace(/\r\n/g, "\n").trim();
+    if (normActual === normExpected) {
+      return {
+        valid: true,
+        actualSnippet,
+        resolvedStartLine: actualStart,
+        resolvedEndLine: actualEnd,
+      };
+    }
+  }
+
+  // 2. If exact range did not match, attempt dynamic search across the file to tolerate
+  // line shifts (e.g. after prior patches were applied in the same file) and minor line numbering drift.
+  if (normExpected.length > 0) {
+    const expectedLines = normExpected.split("\n").map((l) => l.trim());
+    const count = expectedLines.length;
+
+    // Helper: test if lines starting at idx match expectedLines
+    const matchesAt = (startIdx: number): boolean => {
+      if (startIdx < 0 || startIdx + count > lines.length) {
+        return false;
+      }
+      for (let i = 0; i < count; i++) {
+        if (lines[startIdx + i].trim() !== expectedLines[i]) {
+          return false;
+        }
+      }
+      return true;
+    };
+
+    // First search in neighborhood (+/- 100 lines around startLine)
+    let bestStartIdx: number | null = null;
+    const targetIdx = actualStart - 1;
+    for (let delta = 1; delta <= 100; delta++) {
+      const up = targetIdx - delta;
+      if (matchesAt(up)) {
+        bestStartIdx = up;
+        break;
+      }
+      const down = targetIdx + delta;
+      if (matchesAt(down)) {
+        bestStartIdx = down;
+        break;
+      }
+    }
+
+    // If not in neighborhood, scan the whole document
+    if (bestStartIdx === null) {
+      for (let i = 0; i <= lines.length - count; i++) {
+        if (matchesAt(i)) {
+          bestStartIdx = i;
+          break;
+        }
+      }
+    }
+
+    if (bestStartIdx !== null) {
+      const foundStart = bestStartIdx + 1;
+      const foundEnd = bestStartIdx + count;
+      const snippet = lines.slice(bestStartIdx, bestStartIdx + count).join("\n");
+      return {
+        valid: true,
+        actualSnippet: snippet,
+        resolvedStartLine: foundStart,
+        resolvedEndLine: foundEnd,
+      };
+    }
+  }
+
+  // 3. Check if the patch's replacementCode is already present in the file
+  if (replacementCode && replacementCode.trim().length > 0) {
+    const normReplacement = replacementCode.replace(/\r\n/g, "\n").trim();
+    if (fileContent.replace(/\r\n/g, "\n").includes(normReplacement)) {
+      return {
+        valid: true,
+        alreadyApplied: true,
+        actualSnippet: normReplacement,
+        resolvedStartLine: actualStart,
+        resolvedEndLine: actualEnd,
+      };
+    }
+  }
+
+  // 4. Fallback error reporting
   if (actualStart > lines.length) {
     return {
       valid: false,
@@ -492,18 +587,11 @@ export function validateTemplatePatchContent(
   }
 
   const actualSnippet = lines.slice(actualStart - 1, actualEnd).join("\n");
-  const normActual = actualSnippet.replace(/\r\n/g, "\n").trim();
-  const normExpected = (expectedOriginalCode || "").replace(/\r\n/g, "\n").trim();
-
-  if (normActual !== normExpected) {
-    return {
-      valid: false,
-      actualSnippet,
-      error: `File content at lines ${startLine}-${endLine} has changed since the patch was generated. Expected:\n"""\n${expectedOriginalCode}\n"""\nFound:\n"""\n${actualSnippet}\n"""`,
-    };
-  }
-
-  return { valid: true, actualSnippet };
+  return {
+    valid: false,
+    actualSnippet,
+    error: `File content at lines ${startLine}-${endLine} has changed since the patch was generated. Expected:\n"""\n${expectedOriginalCode}\n"""\nFound:\n"""\n${actualSnippet}\n"""`,
+  };
 }
 
 /**
@@ -649,8 +737,9 @@ export function createContextTools(options: {
   };
   onPatchProposed?: (patch: TemplatePatchProposal) => void;
   finishOnPatch?: boolean;
+  getRunTrajectory?: () => Promise<RunTrajectoryResult> | RunTrajectoryResult;
 }): HelperTool<TemplatePatchProposal | any>[] {
-  const { capture, compareCapture, projectPath, attributions, fsImpl, onPatchProposed, finishOnPatch } = options;
+  const { capture, compareCapture, projectPath, attributions, fsImpl, onPatchProposed, finishOnPatch, getRunTrajectory } = options;
 
   const tools: HelperTool<TemplatePatchProposal | any>[] = [
     {
@@ -805,13 +894,13 @@ export function createContextTools(options: {
     {
       name: "propose_template_patch",
       description:
-        "Propose a concrete, actionable source code patch for a prompt template to fix contradictions, reduce prompt bloat, or optimize token usage.",
+        "Propose a concrete, actionable source code patch or diff for any file in the project workspace (including prompt templates, scripts, config, route handlers, components, or client code) to fix contradictions, implement features, reduce prompt bloat, or apply requested codebase modifications directly.",
       parameters: {
         type: "object",
         properties: {
           file: {
             type: "string",
-            description: "Relative path to the workspace file being patched (e.g. 'prompts/analyst.prompt').",
+            description: "Relative path to the workspace file being patched (e.g. 'electron/eidos/prompt-composer.js', 'prompts/system.prompt').",
           },
           startLine: {
             type: "number",
@@ -885,6 +974,52 @@ export function createContextTools(options: {
       run: () => {
         const diff = diffCaptures(capture, compareCapture);
         return { content: JSON.stringify(diff, null, 2) };
+      },
+    });
+  }
+
+  if (getRunTrajectory || (capture.run && capture.run.hopCount > 1)) {
+    tools.push({
+      name: "inspect_run_trajectory",
+      description:
+        "Inspect all hops across this user message's agent loop, including token accumulation per hop, intermediate tool calls, model replies, and step-by-step loop trajectory from Hop 1 to the final hop.",
+      parameters: {
+        type: "object",
+        properties: {
+          includeDetails: {
+            type: "boolean",
+            description: "Whether to include full prompt/reply previews for each hop. Defaults to true.",
+          },
+        },
+      },
+      run: async () => {
+        if (!getRunTrajectory) {
+          if (!capture.run) {
+            return { content: "No multi-hop run trajectory is associated with this capture (single standalone prompt call)." };
+          }
+          return {
+            content: JSON.stringify(
+              {
+                runId: capture.run.runId,
+                totalHops: capture.run.hopCount,
+                currentHop: capture.run.hopIndex + 1,
+                triggeringUserQuery: capture.run.triggeringUserQuery,
+                hops: [
+                  {
+                    hopIndex: capture.run.hopIndex,
+                    captureId: capture.id || "current",
+                    loopRole: capture.run.loopRole || "initial",
+                    toolCalls: capture.run.toolCalls || [],
+                  },
+                ],
+              },
+              null,
+              2,
+            ),
+          };
+        }
+        const traj = await getRunTrajectory();
+        return { content: JSON.stringify(traj, null, 2) };
       },
     });
   }

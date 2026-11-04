@@ -11,15 +11,19 @@
 ## 1. Executive Summary & Vision
 
 ### 1.1 The Challenge
+
 Modern AI applications are complex and fragmented. When developers build with LLMs—whether using OpenAI, Anthropic, Ollama, vLLM, Chutes, LangChain, or custom HTTP clients—debugging prompt context is painful. Developers are forced to:
+
 - Manually edit `.env` files or hardcode reverse proxies into source code.
 - Dig through external user configuration directories (`~/.config/...`, `%APPDATA%`).
 - Wonder why an app isn't logging traffic when an in-code default was overridden at runtime.
 
 ### 1.2 The Solution: Autonomous Zero-Config Connection
+
 Context Tracker revolutionizes this experience by employing **Meta AI models (Muse Spark 1.3 and Muse Wonder) as the autonomous reasoning engine of the extension**. 
 
 Instead of brittle, hardcoded TypeScript regexes that break across different languages or frameworks, Meta AI:
+
 1. **Inspects the codebase's client architecture** dynamically.
 2. **Queries the developer's environment** via sensory machine tools.
 3. **Decides where the active runtime endpoint is configured**.
@@ -60,7 +64,9 @@ Developers click **Start capture** and begin debugging immediately. No URLs to t
 ```
 
 ### Loop 1: Architecture Discovery & Static Intelligence
+
 The helper analyzes the project's codebase to classify:
+
 - **LLM Client / SDK:** OpenAI SDK, Anthropic SDK, Ollama REST API, Chutes, vLLM, OpenRouter, LangChain, LlamaIndex, or raw HTTP client (`fetch`, `requests`, `axios`, `httpx`, `aiohttp`).
 - **Configuration Sourcing Hierarchy:**
   - **Type A (Environment Variables):** `.env`, `process.env`, `os.environ` (e.g. `OPENAI_BASE_URL`, `OLLAMA_HOST`).
@@ -70,7 +76,9 @@ The helper analyzes the project's codebase to classify:
 - **Runtime Precedence Decision Rule:** If an application defines a fallback in source code (Type D) but reads an active configuration from disk (Type B or C), the model recognizes that Type D is inert at runtime and directs the proposal to Type B or C.
 
 ### Loop 2: Sensory Tooling & Machine Grounding
+
 To prevent hallucinations and provide ground-truth awareness of the developer's system, Context Tracker provides 6 focused sensory tools:
+
 1. `detect_local_services()`: Fast TCP/socket probes detecting active local AI servers (Ollama on 11434, LM Studio on 1234, vLLM/LocalAI on 8000, Text Generation WebUI on 5000).
 2. `find_user_config_dirs(app_hints)`: Discovers user config directories matching the app across `~/.config`, `~/.<name>`, and `%APPDATA%`.
 3. `search_text(query | queries)`: Parallel regex and multi-query text search with automated secret redaction.
@@ -79,18 +87,21 @@ To prevent hallucinations and provide ground-truth awareness of the developer's 
 6. `propose_address(file, url, reason)`: Verified finish tool ensuring verbatim URL existence, non-proxy loop safety, and active config targeting.
 
 ### Loop 3: Autonomous Traffic Watchdog & Self-Healing Diagnostic Loop
-- **Traffic Watchdog (`src/watchdog.ts`):** Monitors outbound requests reaching recorder port `47321`, tracks request count, and maintains heartbeat uptime.
+
+- **Traffic Watchdog (**`src/watchdog.ts`**):** Monitors outbound requests reaching recorder port `47321`, tracks request count, and maintains heartbeat uptime.
 - **Silence Detection:** If capture is active but 0 requests arrive after user activity (or silence timeout), state transitions to `listening_idle` with an upstream warning banner.
 - **Autonomous Diagnostic Re-Engagement:** User clicks **"Troubleshoot Connection"** (or watchdog triggers). The Meta AI helper re-activates with failure context (`failedFile`, `failedUrl`, symptom).
 - **Self-Healing Resolution:** The helper diagnoses why the previous file was bypassed, discovers the true runtime configuration (e.g. user config file), and presents a **"Switch connection"** proposal with clear explanation.
 
 ### Loop 4: Autonomous Semantic Prompt Attribution (Dynamic Prompts & Templates)
+
 - **The Problem:** Modern prompts contain dynamic variable interpolations, Jinja2/Mustache loops, and RAG context chunks that break verbatim character-for-character matching.
 - **The Meta AI Solution:** When a prompt message contains dynamic content, the user clicks **"✨ Attribute with Meta AI"** (or it runs autonomously).
 - **Agentic Reverse-Engineering:** Meta Muse Spark 1.3 / Muse Wonder inspects the prompt, separates the runtime variable data from the invariant template instructions, executes sensory searches across candidate files, and calls `attribute_prompt` with the verified source file, startLine, and endLine.
 - **Interactive Result:** The prompt slice lights up in distinct purple with an attributed badge (`✨ prompts/analyst.prompt · lines 1–5 · Attributed by Meta AI`). Clicking the badge jumps directly to the source code line in the editor.
 
 ### Loop 5: Live Agent Thoughts, Sensory Action Feed & Interactive Command Console
+
 - **Real-Time Agent Visibility:** Instead of an opaque loading spinner, developers watch Meta AI think and operate in real time in a dedicated command center.
 - **Live Event Streaming:** Streams model reasoning thoughts (`💭 Meta AI Thought`), sensory machine tool invocations (`⚙️ Sensory Tool: detect_local_services()`, `search_text()`), outputs (`📋 Sensory Output`), and verified proposals.
 - **Two-Way Developer-Agent Communication:** Features an interactive command bar and quick action chips (`🔍 Find address`, `🔌 Probe local services`, `🩺 Troubleshoot connection`, `✨ Attribute prompt`). Developers can ask questions about how their app connects or instruct Meta AI to investigate specific ports or directories.
@@ -99,6 +110,7 @@ To prevent hallucinations and provide ground-truth awareness of the developer's 
   - **In the Editor Tab:** Clicking "Open in editor tab" expands Context Tracker into a dual-column command center, placing the Meta AI console on the left and the full context window viewer on the right side-by-side.
 
 ### Loop 6: Context Window Anatomy & Telemetry (The "What & Why" Profiler)
+
 - **The Problem:** Modern LLM prompts are 10k–50k+ token walls of text combining system guidelines, vector RAG grounding documents, tool calling JSON schemas, few-shot examples, and extensive chat histories. Developers can't easily see what each section is, why it was included, or where token budget is being wasted.
 - **The Meta AI Solution:** Meta Muse Spark 1.3 / Muse Wonder performs architectural decomposition and semantic telemetry on the context window in a single batch turn.
 - **Two-Tier Intelligence:**
@@ -110,6 +122,7 @@ To prevent hallucinations and provide ground-truth awareness of the developer's 
   - **Loop 6 to Loop 4 Bridge:** Clicking **"✨ Trace in Code"** on an identified RAG or template section instantly activates the Loop 4 sensory harness to locate the exact source code generator in the project.
 
 ### Loop 8: Conversational Context Interrogation & Prompt Co-Pilot
+
 - **The Problem:** Modern LLM prompts are massive 10,000–50,000+ token context windows. When a model hallucinates, violates constraints, or costs too much, developers cannot easily spot contradictory rules, needle-in-a-haystack data, or bloated tool schemas by manual inspection.
 - **The Meta AI Solution:** Meta Muse Spark 1.3 / Muse Wonder acts as an active, conversational **Prompt Co-Pilot** directly grounded in the captured context window and its Loop 6 semantic anatomy.
 - **Context Sensory Tools (No Token Overload):** Rather than naively dumping 50k tokens into every chat completion turn, Meta AI calls dedicated context sensory machine tools on demand:
@@ -121,7 +134,7 @@ To prevent hallucinations and provide ground-truth awareness of the developer's 
 - **Interactive Scoping & 1-Click Diagnostics:**
   - **Dynamic Scope Bar:** Lets developers interrogate globally (`[🌐 All Context]`), scope to a section (`[🎯 Section msg-3: RAG Grounding ✕]`), or ask about highlighted text (`[✂️ Selection: 142 chars ✕]`).
   - **1-Click Quick Action Chips:** `🔍 Detect Contradictions`, `✂️ Optimize & Prune`, `🛡️ Scan PII`, `💡 Explain Output`, and `🔄 Compare Captures`.
-  - **Closed-Loop Codebase Patching:** When Meta AI spots a prompt bug, it renders an inline **Proposed Patch Card** with syntax-highlighted diff viewer and a **`[✅ Apply Patch to Workspace]`** button. With one click, VS Code safely applies the patch via `vscode.workspace.applyEdit` with race-condition on-disk content verification.
+  - **Closed-Loop Codebase Patching:** When Meta AI spots a prompt bug, it renders an inline **Proposed Patch Card** with syntax-highlighted diff viewer and a `[✅ Apply Patch to Workspace]` button. With one click, VS Code safely applies the patch via `vscode.workspace.applyEdit` with race-condition on-disk content verification.
 
 ---
 
@@ -149,46 +162,52 @@ Context Tracker includes a comprehensive multi-framework demonstration suite (`t
 ## 4. 3-Minute Video Pitch & Walkthrough Script
 
 ### **[0:00 - 0:30] Hook & Problem Statement**
+
 - **Visual:** Open VS Code. An LLM agent project is running in a terminal.
 - **Presenter (Voiceover):**  
-  *"Building AI applications is exciting, but debugging LLM prompts is still surprisingly primitive. You send a message, get an unexpected answer, and ask: 'What exact prompt did my code send to the model?'*  
-  *Normally, getting answers means manually editing `.env` files, setting up mitmproxy, or hardcoding localhost URLs into your code. It's tedious, fragile, and leaks API keys.*  
-  *Meet **Context Tracker**—the zero-config prompt recorder powered by Meta AI."*
+  *"Every model call is built from instructions, conversation history, tools, and sometimes retrieved data. When the answer is wrong, it is hard to see exactly what the model received—or which part of your code put it there.*  
+  *Context Tracker captures the request inside VS Code. You inspect the context, and Meta AI traces each piece back to the file it came from.*  
+  *Let me show you how it works."*
 
 ### **[0:30 - 1:15] The Meta AI Autonomous Brain**
+
 - **Visual:** Click "Start capture" in Context Tracker. The spinner shows *"AI helper is searching"*. Expand the log/details to show Meta Muse Spark tool calls.
 - **Presenter (Voiceover):**  
-  *"Context Tracker doesn't use hardcoded regexes or rigid assumptions. Instead, we use Meta AI's Muse Spark 1.3 and Muse Wonder as an autonomous reasoning engine.*  
-  *When you click Start capture, Meta AI inspects the codebase architecture, queries our sensory tools to detect active local services like Ollama or vLLM, searches for external user config directories, and batches its reconnaissance using parallel tool calling.*  
-  *In under two seconds, Meta AI identifies the exact runtime configuration and arms our recorder on port 47321."*
+  *"Context Tracker does not guess with hardcoded patterns. Meta AI's Muse Spark 1.3 reads the project and decides how to connect.*  
+  *You click Start capture. Meta AI looks through the code, checks for local services like Ollama or vLLM, and searches your config files. It runs those checks at the same time.*  
+  *Very quickly, it finds the runtime configuration and starts the recorder on port 47321."*
 
 ### **[1:15 - 1:55] Live Prompt Capture, Anatomy Telemetry & Attribution**
-- **Visual:** Send a chat message in the demo app containing dynamic user data and retrieved context. Context Tracker intercepts the call and renders the **Context Window Composition Bar** and **Section Anatomy Cards**.
+
+- **Visual:** Send a message in the app. Context Tracker intercepts the call and shows the composition bar plus a card for each section of the prompt.
 - **Presenter (Voiceover):**  
-  *"Let's send a request in our app. Boom! Context Tracker intercepts the call. Look at the top: our new **Context Anatomy & Telemetry Bar** instantly dissects the 12,000-token prompt.*  
-  *Meta AI profiles each section: 22% System Instructions, 48% RAG Grounding, and 20% Chat History.*  
-  *Each section features **🎯 WHAT** and **💡 WHY** badges explaining the prompt engineering rationale. Notice this amber warning? Meta AI caught a context bloat advisory where older turns consume 68% of the token window!*  
-  *And when we see an injected RAG chunk, one click on **'✨ Trace in Code'** activates Meta AI to reverse-engineer the prompt, search the codebase, and jump directly to the exact file and line number in the editor."*
+  *"Let's send a request in the app. Context Tracker catches the call.*  
+  *The bar at the top splits the prompt into sections and shows how much of the token budget each one uses. That split follows the app: instructions, chat history, tools, or retrieved data.*  
+  *Meta AI labels each section with what it is and why it is there.*  
+  *If a section comes from the project, you can jump to the file and line that produced it. When the text was built at runtime, Meta AI traces it back to the source."*
 
 ### **[1:55 - 2:30] Autonomous Prompt Co-Pilot, Contradiction Detection & 1-Click Codebase Patching**
+
 - **Visual:** In Context Tracker, click **"🔍 Detect Contradictions"** or click **"💬 Ask AI"** on a RAG Anatomy Card. Meta AI streams reasoning, calls `search_context` and `inspect_code_template`, detects the conflicting instruction, and pops an inline **Proposed Patch Card** with a syntax-highlighted diff preview. Click **"✅ Apply Patch to Workspace"**.
 - **Presenter (Voiceover):**  
-  *"Now for the ultimate feature: **Loop 8 Prompt Co-Pilot**. In real apps, prompts span 30,000+ tokens. When hallucinations occur, developers don't want to read a 50-page wall of text.*  
-  *We click **'🔍 Detect Contradictions'**. Meta AI uses context sensory tools to cross-reference our system instructions against retrieved RAG documents.*  
-  *Look at that: Meta AI flags that our system prompt strictly forbade mentioning competitor FooCorp, but our vector database retrieved a FooCorp pricing comparison!*  
-  *Even better, Meta AI inspects the source template and generates an actionable diff. We click **'Apply Patch to Workspace'**—and Context Tracker patches `support_agent.prompt` directly in VS Code. Observability to resolution in 10 seconds!"*
+*"Now for the ultimate feature: **Loop 8 Prompt Co-Pilot**. In real apps, prompts span 30,000+ tokens. When hallucinations occur, developers don't want to read a 50-page wall of text.*  
+*We click **'🔍 Detect Contradictions'**. Meta AI uses context sensory tools to cross-reference our system instructions against retrieved RAG documents.*  
+*Look at that: Meta AI flags that our system prompt strictly forbade mentioning competitor FooCorp, but our vector database retrieved a FooCorp pricing comparison!*  
+*Even better, Meta AI inspects the source template and generates an actionable diff. We click **'Apply Patch to Workspace'**—and Context Tracker patches `support_agent.prompt` directly in VS Code. Observability to resolution in 10 seconds!"*
 
 ### **[2:30 - 2:45] Autonomous Self-Healing Diagnostic Loop (Best Agentic Use-Case)**
+
 - **Visual:** Switch to an app with an in-tree default fallback and an external `~/.config` file. Click "Start capture". Watchdog displays *"Listening idle · 0 requests received"*. Click **"Troubleshoot Connection"**.
 - **Presenter (Voiceover):**  
-  *"And if an application has a hidden configuration hierarchy, our Traffic Watchdog detects zero requests and engages the self-healing loop.*  
-  *Meta AI analyzes the silence, queries `find_user_config_dirs`, finds the real user config file, and hot-swaps the connection with one click."*
+*"And if an application has a hidden configuration hierarchy, our Traffic Watchdog detects zero requests and engages the self-healing loop.*  
+*Meta AI analyzes the silence, queries* `find_user_config_dirs`*, finds the real user config file, and hot-swaps the connection with one click."*
 
 ### **[2:45 - 3:00] Security & Wrap-Up**
+
 - **Visual:** Click "Stop capture". Show `.env` and source code cleanly restored.
 - **Presenter (Voiceover):**  
-  *"Security and privacy are non-negotiable. Context Tracker unconditionally redacts API keys and tokens before sending context to Meta AI, sandboxes all file operations, and automatically restores all modified files when capture stops.*  
-  *Context Tracker: zero-config, autonomous, and powered by Meta AI. Thanks for watching!"*
+*"Security and privacy are non-negotiable. Context Tracker unconditionally redacts API keys and tokens before sending context to Meta AI, sandboxes all file operations, and automatically restores all modified files when capture stops.*  
+*Context Tracker: zero-config, autonomous, and powered by Meta AI. Thanks for watching!"*
 
 ---
 

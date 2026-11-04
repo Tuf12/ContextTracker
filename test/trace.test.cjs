@@ -8,7 +8,7 @@ const { deriveMessageSpans } = require("../out/matcher.js");
 const { extractReply, looksLikeGeneration, normalizeRequest } = require("../out/parse.js");
 const { applyEnv, readEnvStatus, restoreEnv, rewriteEnv } = require("../out/env.js");
 const { chooseUpstream, providerFor, upstreamUrl } = require("../out/recorder.js");
-const { armRedirect, chooseEndpoint, findEndpoints, planRewrite, restoreAllRedirects } = require("../out/redirect.js");
+const { armRedirect, chooseEndpoint, endpointFromRedirectBackup, findEndpoints, locateEndpointInFile, planRewrite, restoreAllRedirects } = require("../out/redirect.js");
 const { CaptureStore, extractCleanQuote, extractCleanQuotes, extractInvariantPrefix, matchCachedAttribution, hashPromptText } = require("../out/store.js");
 const { deriveCapture, presentCapture } = require("../out/derive.js");
 
@@ -220,6 +220,26 @@ test("start capture can point a local model address at the recorder and restore 
   assert.match(updated, /api_key: keep-me/);
   restoreAllRedirects(backups);
   assert.equal(fs.readFileSync(path.join(root, "config.yaml"), "utf8"), original);
+});
+
+test("redirect backup keeps model address after globalState is cleared", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "context-tracker-redirect-meta-"));
+  const backups = fs.mkdtempSync(path.join(os.tmpdir(), "context-tracker-redirect-meta-backup-"));
+  const filePath = path.join(root, "config.yaml");
+  fs.writeFileSync(filePath, "models:\n  local:\n    base_url: http://localhost:11434\n");
+  const chosen = chooseEndpoint(findEndpoints(root));
+  assert.ok(chosen);
+  const plan = planRewrite(chosen.value, "http://127.0.0.1:47321");
+  armRedirect(backups, chosen, plan.writeValue);
+  const recovered = endpointFromRedirectBackup(backups, root);
+  assert.ok(recovered);
+  assert.equal(recovered.value, "http://localhost:11434");
+  assert.match(fs.readFileSync(filePath, "utf8"), /47321/);
+  const located = locateEndpointInFile(root, recovered);
+  assert.ok(located);
+  assert.match(located.value, /47321/);
+  restoreAllRedirects(backups);
+  assert.match(fs.readFileSync(filePath, "utf8"), /11434/);
 });
 
 test("indexing discovers template assets (.prompt, .jinja2, .mustache, .template, prompts/ dir)", async () => {

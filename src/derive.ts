@@ -62,12 +62,14 @@ export function deriveCapture(capture: StoredCapture, index: ProjectIndex | null
     fileSpanCount,
     telemetry,
     sections,
+    run: capture.run,
   };
 }
 
 export function presentCapture(capture: CaptureView): CaptureView {
   return {
     ...capture,
+    run: capture.run,
     telemetry: capture.telemetry,
     sections: capture.sections,
     messages: capture.messages.map((message) => ({

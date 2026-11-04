@@ -375,6 +375,7 @@ export function toSummary(capture: StoredCapture): CaptureSummary {
     error: capture.error,
     preview: preview || "Empty prompt",
     fileSpanCount,
+    run: capture.run,
   };
 }
 

@@ -10,6 +10,7 @@ const MAX_REPLY = 8 * 1024 * 1024;
 
 export type RecorderCapture = {
   clientRequestId: string | null;
+  explicitRunId?: string | null;
   provider: string;
   upstream: string;
   endpoint: string;
@@ -138,6 +139,7 @@ async function handle(
       options.onCapture({
         ...parsed,
         clientRequestId: clientId(req),
+        explicitRunId: explicitRunId(req),
         provider: "custom",
         upstream: route.customUpstream,
         status: null,
@@ -155,6 +157,7 @@ async function handle(
   await forward(req, res, body, target, parsed, {
     provider: providerFor(route, req.headers),
     clientRequestId: clientId(req),
+    explicitRunId: explicitRunId(req),
     onCapture: options.onCapture,
     onLog: options.onLog,
   });
@@ -189,6 +192,7 @@ function forward(
   meta: {
     provider: string;
     clientRequestId: string | null;
+    explicitRunId?: string | null;
     onCapture: (capture: RecorderCapture) => void;
     onLog: (line: string) => void;
   },
@@ -202,6 +206,7 @@ function forward(
       saved = true;
       meta.onCapture({
         clientRequestId: meta.clientRequestId,
+        explicitRunId: meta.explicitRunId,
         provider: meta.provider,
         upstream: `${target.protocol}//${target.host}`,
         endpoint: parsed.endpoint,
@@ -348,7 +353,15 @@ function forwardHeaders(req: IncomingMessage, bodyLength: number, target: URL): 
   const headers: http.OutgoingHttpHeaders = {};
   for (const [key, value] of Object.entries(req.headers)) {
     const lower = key.toLowerCase();
-    if (HOP_BY_HOP.has(lower) || lower === "host" || lower === "content-length" || lower === "accept-encoding" || lower === "x-context-tracker-id") {
+    if (
+      HOP_BY_HOP.has(lower) ||
+      lower === "host" ||
+      lower === "content-length" ||
+      lower === "accept-encoding" ||
+      lower === "x-context-tracker-id" ||
+      lower === "x-context-tracker-run-id" ||
+      lower === "x-run-id"
+    ) {
       continue;
     }
     if (value !== undefined) {
@@ -373,6 +386,12 @@ function responseHeaders(src: IncomingHttpHeaders): http.OutgoingHttpHeaders {
 
 function clientId(req: IncomingMessage): string | null {
   const value = req.headers["x-context-tracker-id"];
+  const id = Array.isArray(value) ? value[0] : value;
+  return id && id.trim() ? id.trim().slice(0, 200) : null;
+}
+
+function explicitRunId(req: IncomingMessage): string | null {
+  const value = req.headers["x-context-tracker-run-id"] ?? req.headers["x-run-id"];
   const id = Array.isArray(value) ? value[0] : value;
   return id && id.trim() ? id.trim().slice(0, 200) : null;
 }

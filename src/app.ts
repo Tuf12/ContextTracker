@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "path";
 import * as vscode from "vscode";
 import { deriveCapture, presentCapture } from "./derive";
-import { ANTHROPIC_ENV, applyEnv, OPENAI_ENV, proposedBases, readEnvStatus, restoreEnv } from "./env";
+import { ANTHROPIC_ENV, applyEnv, envPointsAtCapturePort, OPENAI_ENV, proposedBases, readEnvStatus, restoreEnv } from "./env";
 import { completeChat, listHelperModels, META_HELPER_BASE, META_MODELS, sanitizeMessagesForHelperApi, type ChatMessage } from "./helperClient";
 import {
   ADDRESS_SYSTEM,
@@ -21,13 +21,13 @@ import {
   buildOptimizeContextPrompt,
   buildScanPiiPrompt,
 } from "./helperTools";
-import { createContextTools, validateTemplatePatchContent } from "./contextTools";
+import { createContextTools, proposeTemplatePatch, validateTemplatePatchContent } from "./contextTools";
 import { runHarness } from "./harness";
 import { panelHtml } from "./html";
 import { indexProject } from "./indexer";
 import { isHomeConfigPath, isInside, projectKey, resolveAddressFile, resolveProjectFile } from "./paths";
 import { CAPTURE_PORT, chooseUpstream, startRecorder, type RecorderCapture, type RecorderServer } from "./recorder";
-import { armRedirect, chooseEndpoint, endpointLabel, findEndpoints, planRewrite, restoreAllRedirects, type FoundEndpoint } from "./redirect";
+import { armRedirect, chooseEndpoint, endpointFromRedirectBackup, endpointLabel, findEndpoints, hasRedirectBackup, isCaptureUrl, locateEndpointInFile, planRewrite, restoreAllRedirects, type FoundEndpoint } from "./redirect";
 import { CaptureStore, extractCleanQuote, extractCleanQuotes, extractInvariantPrefix, hashPromptText, matchCachedAttribution } from "./store";
 import {
   applyTelemetryResponse,
@@ -62,8 +62,12 @@ import type {
   HelperActivityKind,
   ProjectIndex,
   ProjectView,
+  PromptMessage,
   ReportedSpan,
   RouteSettings,
+  RunHopInfo,
+  RunTrajectoryHop,
+  RunTrajectoryResult,
   StoredCapture,
   TemplatePatchProposal,
   ViewState,
@@ -76,6 +80,43 @@ const HELPER_MODEL = "contextTracker.helperModel";
 const HELPER_SECRET = "contextTracker.helperApiKey";
 const SAVED_ENDPOINT_PREFIX = "contextTracker.savedEndpoint.";
 
+type ActiveRunState = {
+  runId: string;
+  triggeringUserHash: string;
+  triggeringUserQuery: string;
+  lastCaptureTime: number;
+  captureIds: string[];
+};
+
+function extractTriggeringUserMessage(messages: PromptMessage[]): { text: string; hash: string } {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role === "user" && m.content && m.content.trim()) {
+      const text = m.content.trim();
+      return { text, hash: hashPromptText(text) };
+    }
+  }
+  const fallback = messages[0]?.content?.trim() || "Empty prompt";
+  return { text: fallback, hash: hashPromptText(fallback) };
+}
+
+function extractToolCalls(messages: PromptMessage[], reply: string): string[] {
+  const tools = new Set<string>();
+  for (const m of messages) {
+    const fnMatches = m.content.matchAll(/\[(?:call|tool_use|function_call):\s*([a-zA-Z0-9_\-\.]+)/g);
+    for (const match of fnMatches) {
+      if (match[1]) tools.add(match[1]);
+    }
+  }
+  const replyMatches = reply.matchAll(/"name":\s*"([a-zA-Z0-9_\-\.]+)"/g);
+  for (const match of replyMatches) {
+    if (match[1] && !["function", "object", "string"].includes(match[1])) {
+      tools.add(match[1]);
+    }
+  }
+  return Array.from(tools).slice(0, 5);
+}
+
 export class TrackerApp {
   private readonly output: vscode.OutputChannel;
   private readonly status: vscode.StatusBarItem;
@@ -87,6 +128,7 @@ export class TrackerApp {
   private readonly writes = new Map<string, Promise<void>>();
   private readonly clientIds = new Map<string, string>();
   private readonly pendingSpans = new Map<string, ReportedSpan[]>();
+  private readonly activeRuns = new Map<string, ActiveRunState>();
   private project: ProjectView | null = null;
   private index: ProjectIndex | null = null;
   private indexGeneration = 0;
@@ -267,10 +309,10 @@ export class TrackerApp {
     this.indexGeneration += 1;
     clearTimeout(this.statusTimer);
     this.watchdog.stop();
-    restoreAllRedirects(this.redirectDir);
     void removeAndroidBridge().catch(() => undefined);
     void this.server?.close().catch(() => undefined);
     this.server = null;
+    this.restoreProjectRouting();
     this.panel?.dispose();
     for (const item of this.disposables) {
       item.dispose();
@@ -534,6 +576,7 @@ export class TrackerApp {
     const initialConv = await this.loadConversation(currentKey);
     this.activePatch = initialConv.activePatch ?? null;
     await this.context.globalState.update(PROJECT_KEY, resolved);
+    await this.reconcileInterruptedCapture();
     this.refreshStatus();
     this.push();
     const index = await indexProject(resolved, undefined, () => generation === this.indexGeneration);
@@ -600,7 +643,13 @@ export class TrackerApp {
   }
 
   private async armCapture(chosen: FoundEndpoint): Promise<void> {
-    const plan = planRewrite(chosen.value, `http://127.0.0.1:${CAPTURE_PORT}`);
+    const upstreamValue = this.upstreamForCapture(chosen);
+    if (isCaptureUrl(upstreamValue)) {
+      this.recorderError = "Could not determine the real model address. Use Find address with the AI helper or confirm the endpoint again.";
+      this.push();
+      return;
+    }
+    const plan = planRewrite(upstreamValue, `http://127.0.0.1:${CAPTURE_PORT}`);
     this.route = { mode: "custom", customUpstream: plan.upstream };
     try {
       chooseUpstream(this.route, {});
@@ -641,7 +690,7 @@ export class TrackerApp {
     } catch (error) {
       await this.server.close().catch(() => undefined);
       this.server = null;
-      restoreAllRedirects(this.redirectDir);
+      this.restoreProjectRouting();
       this.recorderError = error instanceof Error ? error.message : "The model address could not be updated.";
       this.refreshStatus();
       this.push();
@@ -873,7 +922,7 @@ export class TrackerApp {
     }
     await removeAndroidBridge().catch(() => undefined);
     this.activeAndroidBridge = false;
-    restoreAllRedirects(this.redirectDir);
+    this.restoreProjectRouting();
     this.refreshFoundLabel();
     this.lastEvent = "Capture is off, and the model address is restored.";
     this.refreshStatus();
@@ -1484,7 +1533,7 @@ export class TrackerApp {
     }
     await removeAndroidBridge().catch(() => undefined);
     this.activeAndroidBridge = false;
-    restoreAllRedirects(this.redirectDir);
+    this.restoreProjectRouting();
     const key = SAVED_ENDPOINT_PREFIX + projectKey(this.project.path);
     await this.context.globalState.update(key, undefined);
     this.ignoredEndpoints.add(this.project.path);
@@ -1499,27 +1548,68 @@ export class TrackerApp {
   private getSavedEndpoint(projectPath: string): FoundEndpoint | null {
     const key = SAVED_ENDPOINT_PREFIX + projectKey(projectPath);
     const saved = this.context.globalState.get<FoundEndpoint>(key);
-    if (!saved || typeof saved !== "object" || !saved.filePath || !saved.value) {
+    const candidate =
+      saved && typeof saved === "object" && saved.filePath && saved.value
+        ? saved
+        : endpointFromRedirectBackup(this.redirectDir, projectPath);
+    if (!candidate?.filePath || !candidate.value) {
       return null;
     }
-    const filePath = resolveAddressFile(projectPath, saved.filePath);
-    if (!filePath || !fs.existsSync(filePath)) {
-      return null;
+    return locateEndpointInFile(projectPath, candidate);
+  }
+
+  private upstreamForCapture(endpoint: FoundEndpoint): string {
+    if (!isCaptureUrl(endpoint.value)) {
+      return endpoint.value;
     }
-    try {
-      const content = fs.readFileSync(filePath, "utf8");
-      const lines = content.split(/\r?\n/);
-      const idx = lines.findIndex((line) => line.includes(saved.value));
-      if (idx < 0) {
-        return null;
+    const key = SAVED_ENDPOINT_PREFIX + projectKey(endpoint.projectPath);
+    const saved = this.context.globalState.get<FoundEndpoint>(key);
+    if (saved?.value && !isCaptureUrl(saved.value)) {
+      return saved.value;
+    }
+    const backup = endpointFromRedirectBackup(this.redirectDir, endpoint.projectPath);
+    if (backup?.value && !isCaptureUrl(backup.value)) {
+      return backup.value;
+    }
+    const custom = this.route.customUpstream.trim();
+    if (custom && !isCaptureUrl(custom)) {
+      return custom;
+    }
+    return endpoint.value;
+  }
+
+  private restoreProjectRouting(): void {
+    restoreAllRedirects(this.redirectDir);
+    if (this.project) {
+      restoreEnv(this.project.path, this.backupDir);
+    }
+  }
+
+  private async reconcileInterruptedCapture(): Promise<void> {
+    if (!this.project || this.server) {
+      return;
+    }
+    let restored = false;
+    if (hasRedirectBackup(this.redirectDir, this.project.path)) {
+      const recovered = endpointFromRedirectBackup(this.redirectDir, this.project.path);
+      if (recovered) {
+        await this.saveConfirmedEndpoint(recovered);
       }
-      return {
-        ...saved,
-        filePath,
-        line: idx + 1,
-      };
-    } catch {
-      return null;
+      restoreAllRedirects(this.redirectDir);
+      restored = true;
+    }
+    if (restoreEnv(this.project.path, this.backupDir)) {
+      restored = true;
+    }
+    if (envPointsAtCapturePort(this.project.path) && !restored) {
+      this.lastEvent =
+        "This project's .env still points at capture port 47321, but capture is off. Use Restore .env in the panel, or edit OPENAI_BASE_URL / ANTHROPIC_BASE_URL, then Start capture again.";
+      return;
+    }
+    if (restored) {
+      this.lastEvent =
+        "Restored the project's model address after capture was interrupted. Click Start capture, restart your app, then send a prompt.";
+      this.refreshFoundLabel();
     }
   }
 
@@ -1620,6 +1710,67 @@ export class TrackerApp {
     return changed;
   }
 
+  private async buildRunTrajectory(capture: StoredCapture): Promise<RunTrajectoryResult | null> {
+    if (!capture.run || !this.project) {
+      return null;
+    }
+    const runId = capture.run.runId;
+    const projectCaptures = await this.store.list(this.project.path);
+    const matchingSummaries = projectCaptures
+      .filter((s) => s.run && s.run.runId === runId)
+      .sort((a, b) => (a.run?.hopIndex ?? 0) - (b.run?.hopIndex ?? 0));
+
+    if (matchingSummaries.length === 0) {
+      return null;
+    }
+
+    const hops: RunTrajectoryHop[] = [];
+    let initialTokens = 0;
+    let currentTokens = 0;
+
+    for (const sum of matchingSummaries) {
+      const full = this.live.get(sum.id) ?? (await this.store.get(this.project.path, sum.id));
+      const tokens = full
+        ? full.messages.reduce((s, m) => s + estimateTokens(m.content), 0)
+        : Math.round(sum.preview.length / 4);
+      if (sum.run?.hopIndex === 0) {
+        initialTokens = tokens;
+      }
+      if (sum.id === capture.id) {
+        currentTokens = tokens;
+      }
+      hops.push({
+        hopIndex: sum.run?.hopIndex ?? 0,
+        captureId: sum.id,
+        createdAt: sum.createdAt,
+        model: sum.model,
+        estimatedTokens: tokens,
+        status: sum.status,
+        loopRole: sum.run?.loopRole,
+        toolCalls: sum.run?.toolCalls,
+        replyPreview: full ? full.reply.slice(0, 150) : "",
+        isCurrent: sum.id === capture.id,
+      });
+    }
+
+    const delta = currentTokens - initialTokens;
+    const growthPercent = initialTokens > 0 ? Math.round((delta / initialTokens) * 100) : 0;
+
+    return {
+      runId,
+      totalHops: matchingSummaries.length,
+      currentHop: capture.run.hopIndex + 1,
+      triggeringUserQuery: capture.run.triggeringUserQuery,
+      tokenGrowth: {
+        initialTokens,
+        currentTokens,
+        deltaTokens: delta,
+        growthPercent,
+      },
+      hops,
+    };
+  }
+
   private async accept(incoming: RecorderCapture): Promise<void> {
     if (!this.project) {
       return;
@@ -1628,8 +1779,60 @@ export class TrackerApp {
     if (incoming.clientRequestId) {
       this.pendingSpans.delete(incoming.clientRequestId);
     }
+
+    const captureId = crypto.randomUUID();
+    const userMsg = extractTriggeringUserMessage(incoming.messages);
+    const now = Date.now();
+    const RUN_TIMEOUT_MS = 3 * 60 * 1000;
+    const activeRun = this.activeRuns.get(this.project.path);
+    let runId: string;
+    let hopIndex: number;
+    let prevCaptureId: string | null = null;
+    const isExplicit = Boolean(incoming.explicitRunId);
+
+    const isSameRun = isExplicit
+      ? Boolean(activeRun && activeRun.runId === incoming.explicitRunId)
+      : Boolean(
+          activeRun &&
+          activeRun.triggeringUserHash === userMsg.hash &&
+          now - activeRun.lastCaptureTime < RUN_TIMEOUT_MS,
+        );
+
+    if (isSameRun && activeRun) {
+      runId = activeRun.runId;
+      hopIndex = activeRun.captureIds.length;
+      prevCaptureId = activeRun.captureIds[hopIndex - 1] ?? null;
+      activeRun.captureIds.push(captureId);
+      activeRun.lastCaptureTime = now;
+    } else {
+      runId = incoming.explicitRunId || `run_${crypto.randomUUID().slice(0, 8)}`;
+      hopIndex = 0;
+      prevCaptureId = null;
+      this.activeRuns.set(this.project.path, {
+        runId,
+        triggeringUserHash: userMsg.hash,
+        triggeringUserQuery: userMsg.text.slice(0, 120),
+        lastCaptureTime: now,
+        captureIds: [captureId],
+      });
+    }
+
+    const toolCalls = extractToolCalls(incoming.messages, incoming.reply);
+    const currentActiveRun = this.activeRuns.get(this.project.path)!;
+    const runInfo: RunHopInfo = {
+      runId,
+      hopIndex,
+      hopCount: currentActiveRun.captureIds.length,
+      prevCaptureId,
+      nextCaptureId: null,
+      triggeringUserQuery: currentActiveRun.triggeringUserQuery,
+      loopRole: hopIndex === 0 ? "initial" : "tool_call",
+      toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+    };
+
     const capture: StoredCapture = {
-      id: crypto.randomUUID(),
+      id: captureId,
+      run: runInfo,
       clientRequestId: incoming.clientRequestId,
       projectPath: this.project.path,
       createdAt: new Date().toISOString(),
@@ -1643,6 +1846,23 @@ export class TrackerApp {
       reply: incoming.reply,
       reported: pending,
     };
+
+    if (hopIndex > 0) {
+      const totalHops = currentActiveRun.captureIds.length;
+      for (let i = 0; i < currentActiveRun.captureIds.length - 1; i++) {
+        const priorId = currentActiveRun.captureIds[i];
+        const prior = this.live.get(priorId) ?? (await this.store.get(this.project.path, priorId));
+        if (prior && prior.run) {
+          prior.run.hopCount = totalHops;
+          if (i === hopIndex - 1) {
+            prior.run.nextCaptureId = capture.id;
+          }
+          this.live.set(prior.id, prior);
+          await this.store.update(prior);
+        }
+      }
+    }
+
     this.applyCachedAttributions(capture);
     this.live.set(capture.id, capture);
     this.watchdog.recordRequest();
@@ -1752,6 +1972,13 @@ export class TrackerApp {
     if (!this.project) {
       return;
     }
+    const activeRun = this.activeRuns.get(this.project.path);
+    if (activeRun) {
+      activeRun.captureIds = activeRun.captureIds.filter((cid) => cid !== id);
+      if (activeRun.captureIds.length === 0) {
+        this.activeRuns.delete(this.project.path);
+      }
+    }
     this.live.delete(id);
     this.writes.delete(id);
     this.conversations.delete(id);
@@ -1779,6 +2006,7 @@ export class TrackerApp {
     if (!this.project) {
       return;
     }
+    this.activeRuns.delete(this.project.path);
     await this.store.clear(this.project.path);
     this.live.clear();
     this.conversations.clear();
@@ -1790,6 +2018,7 @@ export class TrackerApp {
     this.compareId = null;
     this.activeScope = undefined;
     this.activePatch = null;
+    this.lastEvent = "Cleared saved calls for this project. Model routing and capture connection were not changed — use Stop capture or Restore .env if the app still targets port 47321.";
     this.push();
   }
 
@@ -1954,6 +2183,7 @@ export class TrackerApp {
         patch.startLine,
         patch.endLine,
         patch.originalCode,
+        patch.replacementCode,
       );
 
       if (!validation.valid) {
@@ -1967,8 +2197,40 @@ export class TrackerApp {
         return false;
       }
 
-      const startLineIdx = Math.max(0, patch.startLine - 1);
-      const endLineIdx = Math.max(startLineIdx, patch.endLine - 1);
+      if (validation.alreadyApplied) {
+        this.appliedPatches.add(patch.patchId);
+        for (const conv of this.conversations.values()) {
+          let updated = false;
+          for (const act of conv.activity) {
+            if (act.patch?.patchId === patch.patchId) {
+              act.patchApplied = true;
+              updated = true;
+            }
+          }
+          if (conv.activePatch?.patchId === patch.patchId) {
+            conv.activePatch = null;
+            updated = true;
+          }
+          if (updated) {
+            void this.saveConversationAsync(conv.id);
+          }
+        }
+        if (this.activePatch?.patchId === patch.patchId) {
+          this.activePatch = null;
+        }
+        this.recordActivity({
+          kind: "status",
+          text: `Patch for ${patch.file}:${patch.startLine}-${patch.endLine} is already applied on disk.`,
+        });
+        vscode.window.showInformationMessage(`Patch for ${patch.file} is already applied on disk.`);
+        this.push();
+        return true;
+      }
+
+      const effectiveStart = validation.resolvedStartLine || patch.startLine;
+      const effectiveEnd = validation.resolvedEndLine || patch.endLine;
+      const startLineIdx = Math.max(0, effectiveStart - 1);
+      const endLineIdx = Math.max(startLineIdx, effectiveEnd - 1);
       const range = new vscode.Range(
         new vscode.Position(startLineIdx, 0),
         new vscode.Position(endLineIdx, document.lineAt(endLineIdx).text.length),
@@ -1978,6 +2240,8 @@ export class TrackerApp {
       const success = await vscode.workspace.applyEdit(edit);
       if (success) {
         await document.save();
+        patch.startLine = effectiveStart;
+        patch.endLine = effectiveEnd;
         this.appliedPatches.add(patch.patchId);
         for (const conv of this.conversations.values()) {
           let updated = false;
@@ -2132,11 +2396,28 @@ export class TrackerApp {
           ? this.compare.messages.reduce((sum, m) => sum + estimateTokens(m.content), 0)
           : undefined;
 
+        const runTraj = this.selected.run ? await this.buildRunTrajectory(this.selected) : null;
+        let runTrajectorySummary = "";
+        if (runTraj && runTraj.totalHops > 1) {
+          const hopLines = runTraj.hops.map((h) => {
+            const role = h.loopRole || (h.hopIndex === 0 ? "initial" : "hop");
+            const tools = h.toolCalls && h.toolCalls.length > 0 ? ` [Tools: ${h.toolCalls.join(", ")}]` : "";
+            const currMarker = h.isCurrent ? " (Current View)" : "";
+            return `- Hop ${h.hopIndex + 1}/${runTraj.totalHops}: ~${h.estimatedTokens} tokens (${role})${tools}${currMarker} -> Reply: "${h.replyPreview.replace(/\r?\n/g, " ").slice(0, 80)}"`;
+          });
+          runTrajectorySummary = [
+            "Loop Progression:",
+            ...hopLines,
+            `Trajectory: Net token change from initial hop: ${runTraj.tokenGrowth.deltaTokens >= 0 ? "+" : ""}${runTraj.tokenGrowth.deltaTokens} tokens (${runTraj.tokenGrowth.growthPercent}% growth)`,
+          ].join("\n");
+        }
+
         const contextTools = createContextTools({
           capture: this.selected,
           compareCapture: this.compare || undefined,
           projectPath: this.project.path,
           attributions: this.projectAttributions,
+          getRunTrajectory: runTraj ? () => runTraj : undefined,
           onPatchProposed: (patch) => {
             this.activePatch = patch;
             this.knownPatches.set(patch.patchId, patch);
@@ -2170,28 +2451,105 @@ export class TrackerApp {
           compareModel: this.compare?.model,
           compareTotalTokens: compareTokens,
           compareSkeleton: compareSkeleton,
+          runInfo: this.selected.run,
+          runTrajectorySummary,
         });
       } else {
+        const standalonePatchTool = {
+          name: "propose_template_patch",
+          description:
+            "Propose a concrete, actionable source code patch or diff for any file in the project workspace (including prompt templates, scripts, config, route handlers, components, or client code) to fix contradictions, implement features, reduce prompt bloat, or apply requested codebase modifications directly.",
+          parameters: {
+            type: "object",
+            properties: {
+              file: {
+                type: "string",
+                description: "Relative path to the workspace file being patched (e.g. 'electron/eidos/prompt-composer.js').",
+              },
+              startLine: {
+                type: "number",
+                description: "1-based start line of code being replaced.",
+              },
+              endLine: {
+                type: "number",
+                description: "1-based end line of code being replaced.",
+              },
+              originalCode: {
+                type: "string",
+                description: "Original code or prompt text being replaced.",
+              },
+              replacementCode: {
+                type: "string",
+                description: "New proposed code or replacement text.",
+              },
+              explanation: {
+                type: "string",
+                description: "Explanation of why this patch resolves the issue or implements the requested change.",
+              },
+              tokenImpactEstimate: {
+                type: "string",
+                description: "Estimated token impact (e.g. '-250 tokens', '+5 lines', 'optimized').",
+              },
+            },
+            required: ["file", "startLine", "endLine", "originalCode", "replacementCode", "explanation"],
+          },
+          run: async (args: unknown) => {
+            try {
+              const a = (args && typeof args === "object" ? args : {}) as any;
+              const patch = await proposeTemplatePatch({
+                file: String(a.file || ""),
+                startLine: Number(a.startLine || 1),
+                endLine: Number(a.endLine || 1),
+                originalCode: String(a.originalCode || ""),
+                replacementCode: String(a.replacementCode || ""),
+                explanation: String(a.explanation || ""),
+                tokenImpactEstimate: a.tokenImpactEstimate ? String(a.tokenImpactEstimate) : undefined,
+                projectPath: this.project?.path,
+              });
+
+              this.activePatch = patch;
+              this.knownPatches.set(patch.patchId, patch);
+              conv.activePatch = patch;
+              this.recordActivity({
+                kind: "finish",
+                text: `Proposed template patch for ${patch.file}:${patch.startLine}-${patch.endLine} (${patch.tokenImpactEstimate || "optimized"})`,
+                detail: patch.diffPreview,
+                patch: patch,
+                patchApplied: false,
+              }, targetKey);
+
+              return {
+                content: `Template patch proposal created successfully for ${patch.file}:${patch.startLine}-${patch.endLine}.\n\nDiff preview:\n${patch.diffPreview}\n\nCRITICAL NEXT STEP: You must now explain to the user in conversational detail what was changed in their code, why, and summarize the changes. Deliver your final response via respond(). You may propose additional patches in parallel before calling respond().`,
+              };
+            } catch (err) {
+              return { content: err instanceof Error ? err.message : String(err) };
+            }
+          },
+        };
+
         chatTools = [
+          standalonePatchTool,
           ...baseTools,
           respondTool,
         ];
         systemPrompt = [
           "You are Context Tracker's autonomous AI assistant powered by Meta AI models (Muse Spark 1.3 and Muse Wonder).",
-          "You help developers understand, configure, and debug prompt capture and their LLM client code.",
+          "You help developers understand, configure, and debug prompt capture, and directly modify or patch their project codebase.",
           `Current Project: ${this.project.name} (${this.project.path})`,
           "No prompt capture currently selected.",
           "",
-          "You have access to sensory tools to inspect the developer's codebase and machine:",
+          "You have access to sensory and modification tools for the developer's codebase and machine:",
           "- detect_local_services: Probes local ports (Ollama on 11434, LM Studio on 1234, vLLM on 8000, etc.)",
           "- find_user_config_dirs: Discovers user config directories (~/.config, ~/.<app>, %APPDATA%)",
           "- search_text: Searches codebase for literal or regex patterns",
-          "- read_file: Reads project or user config files",
+          "- read_file: Reads project or user config files with line numbers",
           "- list_files: Lists directory contents",
           "- propose_address: Proposes an active model address to connect capture",
+          "- propose_template_patch: Proposes a concrete, actionable source code diff patch to modify files in the project workspace",
           "- respond: Delivers your final answer or explanation to the user",
           "",
-          "Answer the user concisely and directly. If the user asks you to find an address, search code, or check ports, call the sensory tools first, then deliver your response using respond (or propose_address if proposing a connection).",
+          "### CRITICAL CODE WRITING INSTRUCTION:",
+          "Whenever the user asks you to add, write, modify, implement, or patch code in the project, or whenever you propose code changes, YOU MUST CALL `propose_template_patch` for EACH file being changed so an interactive diff card is created for the user to review and apply to their codebase with one click! DO NOT just output raw code blocks in `respond()` when code modifications are requested. Always call `propose_template_patch` first, then summarize in `respond()`.",
         ].join("\n");
       }
 

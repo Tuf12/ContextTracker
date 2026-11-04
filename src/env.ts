@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { projectKey } from "./paths";
+import { CAPTURE_PORT } from "./recorder";
 import type { EnvStatus } from "./types";
 
 export const OPENAI_ENV = "OPENAI_BASE_URL";
@@ -116,6 +117,28 @@ function urlsMatch(current: string | null, proposed: string): boolean {
 
 function stripUrl(value: string): string {
   return value.trim().replace(/^['"]|['"]$/g, "").replace(/\/$/, "");
+}
+
+export function envPointsAtCapturePort(projectPath: string, port = CAPTURE_PORT): boolean {
+  const filePath = envFilePath(projectPath);
+  if (!fs.existsSync(filePath)) {
+    return false;
+  }
+  const values = parseEnv(fs.readFileSync(filePath, "utf8"));
+  for (const key of ALLOWED) {
+    const raw = values.get(key);
+    if (!raw) {
+      continue;
+    }
+    try {
+      if (new URL(stripUrl(raw)).port === String(port)) {
+        return true;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return false;
 }
 
 function parseEnv(content: string): Map<string, string> {

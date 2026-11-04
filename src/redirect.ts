@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
-import { isRewritablePath, projectKey } from "./paths";
+import { isRewritablePath, projectKey, resolveAddressFile, toRelative } from "./paths";
+import { CAPTURE_PORT } from "./recorder";
 
 export type FoundEndpoint = {
   projectPath: string;
@@ -15,7 +16,106 @@ type Backup = {
   projectPath: string;
   filePath: string;
   content: string;
+  endpoint?: FoundEndpoint;
 };
+
+export function isCaptureUrl(value: string): boolean {
+  try {
+    return new URL(value).port === String(CAPTURE_PORT);
+  } catch {
+    return false;
+  }
+}
+
+export function readRedirectBackup(backupDir: string, projectPath: string): Backup | null {
+  const file = backupPath(backupDir, projectPath);
+  if (!fs.existsSync(file)) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as Backup;
+    if (!parsed || typeof parsed.content !== "string" || typeof parsed.filePath !== "string" || typeof parsed.projectPath !== "string") {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function hasRedirectBackup(backupDir: string, projectPath: string): boolean {
+  return fs.existsSync(backupPath(backupDir, projectPath));
+}
+
+/** Original model URL from a redirect backup (globalState may be cleared after “clear captures”). */
+export function endpointFromRedirectBackup(backupDir: string, projectPath: string): FoundEndpoint | null {
+  const backup = readRedirectBackup(backupDir, projectPath);
+  if (!backup) {
+    return null;
+  }
+  if (backup.endpoint?.filePath && backup.endpoint.value && !isCaptureUrl(backup.endpoint.value)) {
+    return { ...backup.endpoint, projectPath: path.resolve(projectPath) };
+  }
+  return inferEndpointFromBackupContent(backup, projectPath);
+}
+
+function inferEndpointFromBackupContent(backup: Backup, projectPath: string): FoundEndpoint | null {
+  const root = path.resolve(projectPath);
+  const filePath = path.resolve(backup.filePath);
+  if (!isRewritablePath(root, filePath)) {
+    return null;
+  }
+  const relativeFile = toRelative(root, filePath);
+  const lines = backup.content.split(/\r?\n/);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const match = line.match(/https?:\/\/[^\s'"`]+/);
+    if (!match || isCaptureUrl(match[0])) {
+      continue;
+    }
+    return {
+      projectPath: root,
+      filePath,
+      relativeFile,
+      line: index + 1,
+      keyPath: "redirect-backup",
+      value: match[0],
+    };
+  }
+  return null;
+}
+
+export function locateEndpointInFile(projectPath: string, endpoint: FoundEndpoint): FoundEndpoint | null {
+  const filePath = resolveAddressFile(projectPath, endpoint.filePath) ?? resolveAddressFile(projectPath, endpoint.relativeFile);
+  if (!filePath) {
+    return null;
+  }
+  try {
+    const content = fs.readFileSync(filePath, "utf8");
+    const lines = content.split(/\r?\n/);
+    const needles = [endpoint.value];
+    if (!isCaptureUrl(endpoint.value)) {
+      needles.push(`http://127.0.0.1:${CAPTURE_PORT}`, `http://localhost:${CAPTURE_PORT}`);
+    }
+    for (const needle of needles) {
+      const idx = lines.findIndex((line) => line.includes(needle));
+      if (idx >= 0) {
+        const valueMatch = lines[idx].match(/https?:\/\/[^\s'"`]+/);
+        return {
+          ...endpoint,
+          projectPath: path.resolve(projectPath),
+          filePath,
+          relativeFile: toRelative(path.resolve(projectPath), filePath),
+          line: idx + 1,
+          value: valueMatch?.[0] ?? needle,
+        };
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 const MODEL_KEYS = new Set([
   "base_url",
@@ -104,17 +204,24 @@ export function planRewrite(original: string, recorderOrigin: string): { writeVa
 
 export function armRedirect(backupDir: string, endpoint: FoundEndpoint, writeValue: string): void {
   const backupFile = backupPath(backupDir, endpoint.projectPath);
+  const originalContent = fs.readFileSync(endpoint.filePath, "utf8");
   if (!fs.existsSync(backupFile)) {
     fs.mkdirSync(backupDir, { recursive: true });
+    const snapshotEndpoint = isCaptureUrl(endpoint.value)
+      ? inferEndpointFromBackupContent(
+          { projectPath: endpoint.projectPath, filePath: endpoint.filePath, content: originalContent },
+          endpoint.projectPath,
+        ) ?? endpoint
+      : endpoint;
     const payload: Backup = {
       projectPath: endpoint.projectPath,
       filePath: endpoint.filePath,
-      content: fs.readFileSync(endpoint.filePath, "utf8"),
+      content: originalContent,
+      endpoint: snapshotEndpoint,
     };
     fs.writeFileSync(backupFile, JSON.stringify(payload));
   }
-  const current = fs.readFileSync(endpoint.filePath, "utf8");
-  fs.writeFileSync(endpoint.filePath, replaceLineValue(current, endpoint.line, endpoint.value, writeValue));
+  fs.writeFileSync(endpoint.filePath, replaceLineValue(originalContent, endpoint.line, endpoint.value, writeValue));
 }
 
 export function restoreAllRedirects(backupDir: string): void {
@@ -351,14 +458,6 @@ function parseScalar(raw: string): string | null {
     return commentStripped.slice(1, -1);
   }
   return commentStripped;
-}
-
-function isCaptureUrl(value: string): boolean {
-  try {
-    return new URL(value).port === String(47321);
-  } catch {
-    return false;
-  }
 }
 
 function isHttpUrl(value: string): boolean {

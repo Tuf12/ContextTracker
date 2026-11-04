@@ -40,8 +40,47 @@ export type CachedAttribution = {
   attributedAt: string;
 };
 
+export type RunHopInfo = {
+  runId: string;
+  hopIndex: number;
+  hopCount: number;
+  prevCaptureId?: string | null;
+  nextCaptureId?: string | null;
+  triggeringUserQuery: string;
+  loopRole?: "initial" | "tool_call" | "final" | "intermediate";
+  toolCalls?: string[];
+};
+
+export type RunTrajectoryHop = {
+  hopIndex: number;
+  captureId: string;
+  createdAt: string;
+  model: string;
+  estimatedTokens: number;
+  status: number | null;
+  loopRole?: string;
+  toolCalls?: string[];
+  replyPreview: string;
+  isCurrent: boolean;
+};
+
+export type RunTrajectoryResult = {
+  runId: string;
+  totalHops: number;
+  currentHop: number;
+  triggeringUserQuery: string;
+  tokenGrowth: {
+    initialTokens: number;
+    currentTokens: number;
+    deltaTokens: number;
+    growthPercent: number;
+  };
+  hops: RunTrajectoryHop[];
+};
+
 export type StoredCapture = {
   id: string;
+  run?: RunHopInfo;
   clientRequestId: string | null;
   projectPath: string;
   createdAt: string;
@@ -68,6 +107,7 @@ export type CaptureSummary = {
   preview: string;
   fileSpanCount?: number;
   chatCount?: number;
+  run?: RunHopInfo;
 };
 
 export type FilePointer = {
@@ -118,6 +158,7 @@ export type CaptureView = {
   telemetry?: CaptureTelemetry;
   sections?: ContextSection[];
   activeScope?: ContextScope;
+  run?: RunHopInfo;
 };
 
 export type EnvKeyPlan = {

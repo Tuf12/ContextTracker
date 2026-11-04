@@ -18,6 +18,7 @@ import type {
   AndroidSecurityResult,
   AttributedSpan,
   ContextScope,
+  RunHopInfo,
 } from "./types";
 import { type CaptureInput, getOrExtractSections } from "./contextTools";
 
@@ -127,13 +128,17 @@ export function addressTools(
     },
     {
       name: "read_file",
-      description: "Read a text file in the project, or an absolute saved-config path under the user home directory. Secret values are replaced with [private].",
+      description: "Read a text file in the project, or an absolute saved-config path under the user home directory. Returns numbered lines (e.g. '1: ...') so you can accurately reference exact lines for patch proposals. Secret values are replaced with [private].",
       parameters: {
         type: "object",
-        properties: { path: { type: "string" } },
+        properties: {
+          path: { type: "string" },
+          startLine: { type: "integer", description: "Optional 1-based start line to read from." },
+          maxLines: { type: "integer", description: "Optional max lines to read (default: 300)." },
+        },
         required: ["path"],
       },
-      run: (args) => ({ content: readFile(root, stringField(args, "path")) }),
+      run: (args) => ({ content: readFile(root, stringField(args, "path"), args) }),
     },
     {
       name: "find_user_config_dirs",
@@ -357,13 +362,17 @@ export function attributionTools(root: string): Array<HelperTool<AttributedSpan>
     },
     {
       name: "read_file",
-      description: "Read a text file in the project. Secret values are replaced with [private].",
+      description: "Read a text file in the project. Secret values are replaced with [private]. Returns numbered lines.",
       parameters: {
         type: "object",
-        properties: { path: { type: "string" } },
+        properties: {
+          path: { type: "string" },
+          startLine: { type: "integer", description: "Optional 1-based start line to read from." },
+          maxLines: { type: "integer", description: "Optional max lines to read (default: 300)." },
+        },
         required: ["path"],
       },
-      run: (args) => ({ content: readFile(root, stringField(args, "path")) }),
+      run: (args) => ({ content: readFile(root, stringField(args, "path"), args) }),
     },
     {
       name: "attribute_prompt",
@@ -560,7 +569,7 @@ export function searchText(root: string, args: unknown): string {
   return matches.join("\n") || "No matches.";
 }
 
-function readFile(root: string, relativeFile: string): string {
+function readFile(root: string, relativeFile: string, args?: unknown): string {
   if (!relativeFile) {
     return "path is required.";
   }
@@ -580,7 +589,26 @@ function readFile(root: string, relativeFile: string): string {
     if (text.includes("\u0000")) {
       return "That file is not text.";
     }
-    return redactText(text);
+    const lines = text.split(/\r?\n/);
+    let startLine = 1;
+    let maxLines = 300;
+    if (args && typeof args === "object") {
+      const rec = args as Record<string, unknown>;
+      if (typeof rec.startLine === "number" && rec.startLine >= 1) {
+        startLine = Math.floor(rec.startLine);
+      }
+      if (typeof rec.maxLines === "number" && rec.maxLines >= 1) {
+        maxLines = Math.min(500, Math.floor(rec.maxLines));
+      }
+    }
+    const startIdx = Math.max(0, startLine - 1);
+    const slice = lines.slice(startIdx, startIdx + maxLines);
+    const numbered = slice.map((line, idx) => `${startLine + idx}: ${redactText(line)}`).join("\n");
+    const totalLines = lines.length;
+    const header = totalLines > maxLines
+      ? `(Showing lines ${startLine}-${startLine + slice.length - 1} of ${totalLines} total lines in ${relativeFile})\n`
+      : "";
+    return header + numbered;
   } catch {
     return "That file could not be read.";
   }
@@ -1073,6 +1101,8 @@ export type ContextCopilotSystemOptions = {
   compareModel?: string;
   compareTotalTokens?: number;
   compareSkeleton?: string;
+  runInfo?: RunHopInfo;
+  runTrajectorySummary?: string;
 };
 
 /**
@@ -1106,6 +1136,18 @@ export function buildContextCopilotSystem(options: ContextCopilotSystemOptions):
       ].join("\n")
     : "";
 
+  const runSection = options.runInfo && options.runInfo.hopCount > 1
+    ? [
+        "",
+        "### MULTI-HOP AGENT LOOP GROUNDING",
+        `Run ID: ${options.runInfo.runId}`,
+        `Triggering User Query: "${options.runInfo.triggeringUserQuery}"`,
+        `Current Hop: Hop ${options.runInfo.hopIndex + 1} of ${options.runInfo.hopCount} (${options.runInfo.loopRole || (options.runInfo.hopIndex === 0 ? "initial user prompt" : "intermediate hop")})`,
+        options.runTrajectorySummary ? options.runTrajectorySummary : "",
+        "Use `inspect_run_trajectory` to inspect the full loop trajectory, token accumulation, and intermediate tool responses across all hops.",
+      ].filter(Boolean).join("\n")
+    : "";
+
   return [
     "You are Context Tracker's Prompt Co-Pilot powered by Meta AI models (Muse Spark 1.3 and Muse Wonder).",
     "You possess deep expertise in LLM prompt engineering, context optimization, RAG grounding, and prompt debugging.",
@@ -1120,18 +1162,20 @@ export function buildContextCopilotSystem(options: ContextCopilotSystemOptions):
     "### CONTEXT SKELETON",
     options.contextSkeleton || "No context sections available.",
     comparisonSection,
+    runSection,
     "",
     "### SENSORY TOOLS AVAILABLE",
     "- search_context(query, sectionId?, targetCapture?, caseSensitive?): Search across prompt messages and context sections for keywords, variable names, instructions, or regex patterns.",
     "- read_context_section(sectionId, startLine?, maxLines?): Read verbatim lines from a specific section without blowing the token budget.",
     "- inspect_code_template(sectionId): Inspect the source code template, prompt builder, or dynamic variable slots in the developer's workspace that generated this context section.",
-    "- propose_template_patch(file, startLine, endLine, originalCode, replacementCode, explanation, tokenImpactEstimate?): Propose a concrete, actionable source code diff patch to fix contradictions or bloat.",
+    "- propose_template_patch(file, startLine, endLine, originalCode, replacementCode, explanation, tokenImpactEstimate?): Propose a concrete, actionable source code diff patch to modify files in the project workspace (including prompt templates, scripts, config, route handlers, components, or client code).",
     options.compareId ? "- diff_captures(): Compute structural differences, status code comparisons, token shifts, and RAG divergences between the primary and comparison captures." : "",
+    options.runInfo && options.runInfo.hopCount > 1 ? "- inspect_run_trajectory(): Inspect all hops across this user message's agent loop, token accumulation per hop, intermediate tool calls, model replies, and step-by-step trajectory." : "",
     "- detect_local_services, find_user_config_dirs, search_text, read_file, list_files: Workspace sensory tools.",
     "- respond(message): Provide your final response, explanation, or advice directly to the user in clean Markdown.",
     "",
     "### CONVERSATIONAL PROTOCOL & INSTRUCTIONS",
-    "You are a collaborative AI prompt engineering co-pilot. Developers converse with you to understand prompt context, diagnose regressions, and discuss trade-offs.",
+    "You are a collaborative AI prompt engineering co-pilot. Developers converse with you to understand prompt context, diagnose regressions, and directly modify their codebase.",
     "",
     "1. Grounding First: Never guess what the context contains. Always use `search_context` and `read_context_section` to inspect actual prompt content before making assertions.",
     "",
@@ -1140,9 +1184,11 @@ export function buildContextCopilotSystem(options: ContextCopilotSystemOptions):
     "   - Always explain WHY the issue occurred (e.g. conflicting directives between system rules and retrieved RAG context, token explosion from dialogue backlog, prompt injection vulnerabilities).",
     "   - Discuss Alternatives: Always present 2–3 different approaches or trade-offs for how the developer could solve the problem (e.g., Option A: rephrase system prompt rule; Option B: filter or re-rank RAG documents; Option C: prune dialogue turns).",
     "",
-    "3. Actionable Proposals (Optional):",
-    "   - If one of the solutions involves modifying a source template or file in the workspace, you may call `inspect_code_template` and `propose_template_patch` to draft an actionable diff.",
-    "   - NEVER just silently propose a patch and stop without explaining! A patch is an optional tool. You MUST ALWAYS deliver a full conversational response via `respond` explaining your diagnosis, why this happened, the alternative options, and why the patch was formulated.",
+    "3. Actionable Codebase Modifications (CRITICAL):",
+    "   - MANDATORY: Whenever the user asks you to add, write, modify, implement, optimize, or patch code in the project codebase, or whenever you formulate concrete code modifications, YOU MUST CALL `propose_template_patch` for EACH file you are modifying. DO NOT merely write or dump raw code blocks into `respond()`. The developer requires interactive diff cards so they can review and apply your changes directly to the project with one click.",
+    "   - Inspect First: Before calling `propose_template_patch`, call `read_file` (or `inspect_code_template`) to inspect the target file with line numbers and retrieve the exact verbatim code for `originalCode`.",
+    "   - Parallel Multi-File Patches: If an implementation touches multiple files, call `propose_template_patch` for each file in parallel during the turn — one call per file.",
+    "   - After Proposing Patches: Deliver your conversational explanation via `respond()`, summarizing what was changed in each file, why, and how the changes solve the problem.",
     "",
     options.compareId ? "4. Comparative Inquiries: When asked why one capture behaved differently from another, call `diff_captures` first to inspect model/status differences, prompt deltas, and RAG additions." : "",
     "5. Delivery: Deliver your final response via the `respond` tool, presenting clean markdown with specific citations, bullet points, and actionable next steps.",

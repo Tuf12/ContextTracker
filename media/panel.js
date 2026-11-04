@@ -298,8 +298,109 @@ let scrollAnchorAfterRender = null;
   function welcome() {
     return h("section", { class: "welcome" },
       h("h1", null, "Context Tracker"),
-      h("p", { class: "lede" }, "Load a project, run it, and send a message to the model. The prompt that went out shows up here, and any slice that matches a file opens in the editor."),
+      h("p", { class: "lede" }, "Load a project, connect capture to your app’s model address, then inspect every prompt the app sends."),
+      h("ol", { class: "steps" },
+        h("li", null, "Click Load a project and choose the app folder."),
+        h("li", null, "In the Capture card: connect the Meta AI helper if needed, Find address, then Start capture."),
+        h("li", null, "Restart your app and send a prompt — the context window appears under Calls.")),
       h("button", { class: "primary", onClick: send("openProject") }, "Load a project"));
+  }
+
+  function projectConnectSteps(recorder, helper) {
+    const needsHelper = Boolean(helper && (helper.needed || !recorder.found));
+    return h("ol", { class: "steps capture-connect-steps" },
+      h("li", null, "Load the project folder (", h("button", { class: "linkish", type: "button", onClick: send("openProject") }, "Change project"), ")."),
+      needsHelper
+        ? h("li", null, "Connect Meta AI helper (API key below) — required when no model address is found in config files.")
+        : h("li", null, "Confirm the detected model address below (or use Find address to search again)."),
+      h("li", null, "Click ", h("strong", null, "Start capture"), " — Context Tracker rewrites that address to port 47321."),
+      h("li", null, "Fully quit and restart your app, then send a prompt. A new call appears in Calls."));
+  }
+
+  function showHelperCredentials(helper) {
+    return Boolean(helper && (helper.connectOpen || (helper.needed && !helper.keySaved) || helper.offer));
+  }
+
+  function renderHelperCredentials(helper) {
+    if (!helper || !showHelperCredentials(helper)) {
+      return null;
+    }
+    if (!helperChoice && helper.model) {
+      helperChoice = helper.model;
+    }
+    const choices = helper.choices || [];
+    return h("div", { class: "stack capture-helper-credentials" },
+      helper.connectOpen || (helper.needed && !helper.keySaved)
+        ? h("p", { class: "quiet", style: "font-size:11px;margin:0;" }, "API key stays in the editor and is sent only to Meta (for Find address and chat). Muse Spark 1.3 Contributor is the lower-cost model.")
+        : null,
+      helper.connectOpen || (helper.needed && !helper.keySaved)
+        ? h("label", { class: "field" }, "Meta model",
+          h("select", { onChange: (event) => { helperChoice = event.target.value; } },
+            h("option", { value: "", selected: !helperChoice }, "Choose a Meta model"),
+            ...choices.map((choice) => h("option", { value: choice.id, selected: choice.id === helperChoice }, choice.label))))
+        : null,
+      helper.connectOpen || (helper.needed && !helper.keySaved)
+        ? h("label", { class: "field" }, helper.keySaved ? "API key saved. Enter a new key to replace it." : "API key",
+          h("input", {
+            type: "password",
+            value: helperKey,
+            onInput: (event) => { helperKey = event.target.value; },
+          }))
+        : null,
+      helper.status ? h("p", { class: helper.busy ? "note" : "quiet", style: "font-size:12px;margin:0;" }, helper.status) : null,
+      helper.offer && helper.offer.explanation
+        ? h("p", { class: "banner warning", style: "margin:6px 0;" }, helper.offer.explanation)
+        : null,
+      helper.offer ? h("p", { class: "note", style: "font-size:12px;margin:0;" }, helper.offer.relativeFile + " line " + helper.offer.line + " · " + helper.offer.url) : null,
+      helper.connectOpen || (helper.needed && !helper.keySaved)
+        ? h("div", { class: "row", style: "margin-top:4px;" },
+          h("button", { class: "primary", onClick: saveHelper }, "Save API key"))
+        : null);
+  }
+
+  function captureConnectionPanel(recorder, helper) {
+    if (!state.project) {
+      return null;
+    }
+    const showSteps = !recorder.running && state.captures.length === 0;
+    const canFind = helper && !helper.busy && !recorder.running && !helper.offer;
+    const needsKey = !helper || !helper.keySaved;
+
+    return h("div", { class: "capture-connect-panel getting-started", style: "margin:8px 0;" },
+      showSteps ? h("p", { class: "quiet", style: "font-weight:600;font-size:12px;margin:0 0 6px;" }, "Connect a new project") : null,
+      showSteps ? projectConnectSteps(recorder, helper) : null,
+      h("div", { class: "row capture-connect-actions", style: "flex-wrap:wrap;gap:6px;margin-top:8px;" },
+        needsKey
+          ? h("button", {
+            class: "secondary",
+            onClick: send("openHelper"),
+            title: "Add Meta API key so Context Tracker can search the project for the model address",
+          }, helper && helper.connectOpen ? "Meta AI settings ▾" : "Connect Meta AI helper")
+          : h("button", {
+            class: "ghost icon-btn",
+            onClick: send("openHelper"),
+            title: "Change Meta model or API key",
+          }, helperButtonLabel(helper)),
+        canFind
+          ? h("button", {
+            class: needsKey ? "ghost" : "secondary",
+            disabled: needsKey,
+            onClick: needsKey ? undefined : send("findAddress"),
+            title: needsKey
+              ? "Connect Meta AI helper first (API key above)"
+              : "Search this project for the model API base URL",
+          }, "Find address")
+          : null,
+        helper && helper.offer && !recorder.running
+          ? h("button", { class: "primary", onClick: send("confirmAddress") }, helper.offer.explanation ? "Switch connection" : "Use this address")
+          : null,
+        helper && helper.offer && !recorder.running
+          ? h("button", { class: "ghost", onClick: send("dismissAddress") }, "Not this address")
+          : null),
+      renderHelperCredentials(helper),
+      needsKey && canFind
+        ? h("p", { class: "quiet", style: "font-size:11px;margin:6px 0 0;" }, "Find address needs a connected Meta AI helper.")
+        : null);
   }
 
   function shell() {
@@ -471,9 +572,7 @@ let scrollAnchorAfterRender = null;
         h("div", { class: "row", style: "gap:4px;" },
           project.indexing ? null : h("button", { class: "ghost icon-btn", onClick: send("reindex"), title: "Index files again" }, "Reindex"),
           h("button", { class: "ghost icon-btn", onClick: send("openProject") }, "Change"))),
-      isCollapsed ? null : h("p", { class: "quiet", id: "file-count", style: "font-size:12px;" }, count),
-      isCollapsed ? null : h("button", { class: "secondary", style: "font-size:12px;padding:3px 8px;margin-top:2px;", onClick: send("openHelper") }, helperButtonLabel(state.helper)),
-      !isCollapsed && state.helper && helperVisible(state.helper) ? helperCard(state.helper) : null);
+      isCollapsed ? null : h("p", { class: "quiet", id: "file-count", style: "font-size:12px;" }, count));
   }
 
   function recorderCard() {
@@ -558,6 +657,7 @@ let scrollAnchorAfterRender = null;
               : h("button", { class: "ghost icon-btn", onClick: send("forgetAddress"), title: "Disconnect this address and let the AI helper search again" }, "Disconnect"))
         : null,
       isCollapsed ? null : recorder.error ? h("p", { class: "banner" }, recorder.error) : null,
+      isCollapsed ? null : captureConnectionPanel(recorder, helper),
       isCollapsed ? null : h("div", { class: "row", style: "margin-top:4px;" },
         state.helper && state.helper.busy
           ? h("button", { class: "primary", disabled: true }, "AI helper is working…")
@@ -566,9 +666,6 @@ let scrollAnchorAfterRender = null;
             : h("button", { class: "primary", onClick: send("startCapture") }, "Start capture"),
         recorder.running
           ? h("button", { class: "secondary", onClick: send("troubleshootConnection"), title: "Diagnose why prompts might be bypassing Context Tracker" }, "Troubleshoot")
-          : null,
-        !recorder.running && helper && !helper.busy && (helper.keySaved || !recorder.found)
-          ? h("button", { class: "secondary", onClick: send("findAddress"), title: "Use the AI helper to search the project for the model address" }, "Find address")
           : null,
         h("button", { class: "ghost icon-btn", onClick: send("showLog") }, "Log")));
   }
@@ -579,45 +676,6 @@ let scrollAnchorAfterRender = null;
       return "AI helper: " + (choice ? choice.label : "Meta");
     }
     return "Connect AI helper";
-  }
-
-  function helperVisible(helper) {
-    return helper.connectOpen || helper.offer || helper.busy || (helper.needed && !helper.keySaved);
-  }
-
-  function helperCard(helper) {
-    if (!helperChoice && helper.model) {
-      helperChoice = helper.model;
-    }
-    const choices = helper.choices || [];
-    return h("div", { class: "stack" },
-      helper.connectOpen ? h("p", { class: "quiet" }, "The API key stays in the editor and is sent only to Meta. Muse Spark 1.3 Contributor is the lower-cost choice. Meta may use what that helper reads to train future models.") : null,
-      helper.connectOpen ? h("label", { class: "field" }, "Meta model",
-        h("select", { onChange: (event) => { helperChoice = event.target.value; } },
-          h("option", { value: "", selected: !helperChoice }, "Choose a Meta model"),
-          ...choices.map((choice) => h("option", { value: choice.id, selected: choice.id === helperChoice }, choice.label)))) : null,
-      helper.connectOpen ? h("label", { class: "field" }, helper.keySaved ? "API key saved. Enter a new key to replace it." : "API key",
-        h("input", {
-          type: "password",
-          value: helperKey,
-          onInput: (event) => { helperKey = event.target.value; },
-        })) : null,
-      helper.status ? h("p", { class: helper.busy ? "note" : "quiet" }, helper.status) : null,
-      helper.offer && helper.offer.explanation
-        ? h("p", { class: "banner warning", style: "margin:6px 0;" }, helper.offer.explanation)
-        : null,
-      helper.offer ? h("p", { class: "note" }, helper.offer.relativeFile + " line " + helper.offer.line + " · " + helper.offer.url) : null,
-      h("div", { class: "row" },
-        helper.connectOpen ? h("button", { class: "secondary", onClick: saveHelper }, "Connect") : null,
-        !helper.busy && !state.recorder.running && !helper.offer
-          ? h("button", { class: "secondary", onClick: send("findAddress"), title: "Use the AI helper to search the project for the model address" }, "Find address with AI helper")
-          : null,
-        helper.offer
-          ? h("button", { class: "primary", onClick: send("confirmAddress") }, helper.offer.explanation ? "Switch connection" : "Use this address")
-          : null,
-        helper.offer
-          ? h("button", { class: "ghost", onClick: send("dismissAddress") }, "Not this address")
-          : null));
   }
 
   function saveHelper() {
@@ -666,6 +724,12 @@ let scrollAnchorAfterRender = null;
     const chatBadge = capture.chatCount
       ? h("span", { class: "chat-indicator-pill", title: `${capture.chatCount} chat messages on this context window` }, `💬 ${capture.chatCount}`)
       : null;
+    const hopBadge = capture.run && capture.run.hopCount > 1
+      ? h("span", {
+          class: "badge badge-run-hop",
+          title: "Run " + capture.run.runId + ": Hop " + (capture.run.hopIndex + 1) + " of " + capture.run.hopCount,
+        }, "Hop " + (capture.run.hopIndex + 1) + "/" + capture.run.hopCount)
+      : null;
     return h("div", { class: "capture" + (isSelected ? " selected" : "") },
       h("button", {
         class: "capture-open",
@@ -678,6 +742,7 @@ let scrollAnchorAfterRender = null;
         h("div", { class: "spread" },
           h("span", null, when),
           h("span", { class: "meta row", style: "gap:4px;align-items:center;" },
+            hopBadge,
             chatBadge,
             status)),
         h("div", null, capture.model),
@@ -733,12 +798,13 @@ let scrollAnchorAfterRender = null;
     if (!state.selected) {
       return h("section", { class: "stack getting-started" },
         h("h2", null, "Context Window Inspector"),
+        h("p", { class: "quiet" }, "Use the Capture card in the sidebar to connect this project, then send a prompt from your app."),
         h("ol", { class: "steps" },
-          h("li", null, "Click Start capture."),
-          h("li", null, "Start your AI app (or restart it if already running)."),
-          h("li", null, "Send a prompt message from your AI app."),
-          h("li", null, "The prompt context window appears here, with source file attribution and token analysis.")),
-        h("p", { class: "quiet" }, "Select any call on the left to inspect its system instructions, dynamic parameters, and token breakdown."));
+          h("li", null, "In ", h("strong", null, "Capture"), ": connect Meta AI helper if needed, ", h("strong", null, "Find address"), ", then ", h("strong", null, "Start capture"), "."),
+          h("li", null, "Fully quit and restart your AI app (already-open apps keep the old model URL)."),
+          h("li", null, "Send a prompt — a call appears under ", h("strong", null, "Calls"), " on the left."),
+          h("li", null, "Select the call to inspect the full context window, file attribution, and tokens here.")),
+        h("p", { class: "quiet" }, "Select any call on the left to inspect system instructions, dynamic parameters, and token breakdown."));
     }
     if (state.compare) {
       const older = state.compare.createdAt <= state.selected.createdAt ? state.compare : state.selected;
@@ -800,6 +866,89 @@ let scrollAnchorAfterRender = null;
     });
   }
 
+  function renderRunHopBar(capture) {
+    const run = capture && capture.run;
+    if (!run || !run.hopCount || run.hopCount <= 1) {
+      return null;
+    }
+
+    const currentHopNum = run.hopIndex + 1;
+    const totalHops = run.hopCount;
+    const isFirst = run.hopIndex === 0;
+    const isLast = run.hopIndex === totalHops - 1;
+
+    let roleLabel = "Hop " + currentHopNum + " of " + totalHops;
+    if (isFirst) {
+      roleLabel += " · Initial User Prompt";
+    } else if (isLast) {
+      roleLabel += " · Final Turn";
+    } else {
+      roleLabel += " · Tool Execution";
+    }
+    if (run.toolCalls && run.toolCalls.length > 0) {
+      roleLabel += " (" + run.toolCalls.join(", ") + ")";
+    }
+
+    const runCaptures = (state && state.captures ? state.captures : [])
+      .filter((c) => c.run && c.run.runId === run.runId)
+      .sort((a, b) => (a.run.hopIndex ?? 0) - (b.run.hopIndex ?? 0));
+
+    const pills = [];
+    for (let i = 0; i < totalHops; i++) {
+      const isCurrent = i === run.hopIndex;
+      const targetCapture = runCaptures.find((c) => c.run && c.run.hopIndex === i);
+      const targetId = targetCapture ? targetCapture.id : (i === run.hopIndex ? capture.id : null);
+
+      pills.push(
+        h("button", {
+          class: "hop-pill" + (isCurrent ? " active" : "") + (!targetId ? " disabled" : ""),
+          disabled: !targetId || isCurrent,
+          onClick: () => {
+            if (targetId) {
+              post({ type: "selectCapture", id: targetId });
+            }
+          },
+          title: "Jump to Hop " + (i + 1) + " of " + totalHops,
+        }, "Hop " + (i + 1))
+      );
+    }
+
+    return h("div", { class: "run-hop-banner card" },
+      h("div", { class: "spread run-hop-spread", style: "align-items:center;gap:8px;flex-wrap:wrap;" },
+        h("div", { class: "row", style: "gap:8px;align-items:center;flex-wrap:wrap;" },
+          h("span", { class: "badge badge-run", title: "Run ID: " + run.runId }, "🔄 Loop Run"),
+          h("strong", { class: "hop-title", style: "font-size:13px;" }, roleLabel),
+          run.triggeringUserQuery ? h("span", { class: "quiet hop-user-query", style: "font-size:12px;" },
+            "“" + run.triggeringUserQuery.slice(0, 60) + (run.triggeringUserQuery.length > 60 ? "…" : "") + "”"
+          ) : null
+        ),
+        h("div", { class: "row hop-nav-controls", style: "gap:6px;align-items:center;" },
+          h("button", {
+            class: "secondary icon-btn hop-nav-btn",
+            disabled: isFirst || !run.prevCaptureId,
+            onClick: () => {
+              if (run.prevCaptureId) {
+                post({ type: "selectCapture", id: run.prevCaptureId });
+              }
+            },
+            title: isFirst ? "Already at initial hop" : "Go to previous hop in this loop",
+          }, "◀ Prev Hop"),
+          h("div", { class: "hop-pills-row row", style: "gap:3px;" }, ...pills),
+          h("button", {
+            class: "secondary icon-btn hop-nav-btn",
+            disabled: isLast || !run.nextCaptureId,
+            onClick: () => {
+              if (run.nextCaptureId) {
+                post({ type: "selectCapture", id: run.nextCaptureId });
+              }
+            },
+            title: isLast ? "Already at latest recorded hop" : "Go to next hop in this loop",
+          }, "Next Hop ▶")
+        )
+      )
+    );
+  }
+
   function promptColumn(capture, which) {
     const spans = flatten(capture);
     const surface = document.body.dataset.surface;
@@ -818,6 +967,7 @@ let scrollAnchorAfterRender = null;
           h("button", { class: "ghost icon-btn", onClick: () => post({ type: "deleteCapture", id: capture.id }) }, "Delete call"))),
       h("div", { class: "selection-bar-host" }),
       renderPromptScopeBanner(),
+      renderRunHopBar(capture),
       h("p", { class: "meta" }, [
         formatTime(capture.createdAt),
         capture.provider,
@@ -1032,9 +1182,6 @@ let scrollAnchorAfterRender = null;
               },
               title: "Dock chat back into left sidebar",
             }, "⤡ Dock to Sidebar")
-          : null,
-        !helper || !helper.keySaved
-          ? h("button", { class: "secondary icon-btn", onClick: send("openHelper") }, "Connect")
           : null));
 
     const feed = h("div", {
@@ -1143,7 +1290,7 @@ let scrollAnchorAfterRender = null;
       h("div", { class: "spread" },
         h("strong", null, "Meta AI Assistant"),
         h("span", { class: "meta" }, "📁 Project Scope")),
-      h("p", { class: "quiet" }, "Select a call on the left to interrogate its context window, or ask questions about your project, investigate local AI services, or let Meta AI find model addresses."),
+      h("p", { class: "quiet" }, "Use the ", h("strong", null, "Capture"), " card above to connect this project. Select a call here to interrogate its context window, or ask project-level questions below."),
       h("p", { class: "note", style: "margin-top:4px;" }, "Type below or click a quick action to start."));
   }
 
@@ -1340,11 +1487,27 @@ let scrollAnchorAfterRender = null;
   function renderActivityItem(item) {
     const time = formatTime(item.timestamp);
     if (item.kind === "assistant") {
+      const hasCode = Boolean(item.text && item.text.includes("```"));
       return h("div", { class: "helper-item helper-assistant" },
-        h("div", { class: "helper-item-header" },
-          h("span", { class: "helper-badge assistant-badge" }, "🤖 Meta AI"),
+        h("div", { class: "helper-item-header spread" },
+          h("div", { class: "row", style: "gap:6px;align-items:center;" },
+            h("span", { class: "helper-badge assistant-badge" }, "🤖 Meta AI"),
+            hasCode ? h("span", { class: "helper-badge tool-badge", style: "font-size:11px;" }, "Code Proposal") : null),
           h("span", { class: "helper-time" }, time)),
-        hMarkdown("div", "helper-assistant-body helper-markdown", item.text));
+        hMarkdown("div", "helper-assistant-body helper-markdown", item.text),
+        hasCode ? h("div", { class: "row", style: "margin-top:8px;" },
+          h("button", {
+            class: "ghost mini-btn",
+            style: "border:1px solid rgba(255,255,255,0.15);padding:4px 10px;font-size:12px;border-radius:6px;",
+            disabled: Boolean(state.helper && state.helper.busy),
+            onClick: () => {
+              post({
+                type: "helperMessage",
+                text: "Please inspect the target files using read_file and call propose_template_patch for each file with the exact originalCode and replacementCode so I can apply these diffs directly to the workspace.",
+              });
+            },
+            title: "Ask Meta AI to convert these code changes into one-click apply diff cards",
+          }, "🛠️ Convert to One-Click Apply Diffs")) : null);
     }
     if (item.kind === "thought") {
       return h("div", { class: "helper-item helper-thought" },
